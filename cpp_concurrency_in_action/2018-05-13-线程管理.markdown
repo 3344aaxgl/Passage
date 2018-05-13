@@ -1,0 +1,161 @@
+---
+layout: post
+title:  "线程管理"
+date:   2018-05-13 15:28:51 +0800
+categories: cpp_concurrency_in_action
+tags: c++
+description: cpp concurrency in action读书笔记
+---
+
+## 2.1线程管理的基础
+
+每个程序至少有一个线程：执行main函数的线程。
+
+### 2.1.1启动线程
+
+线程在 std::thread 对象创建(为线程指定任务)时启动
+
+可以以函数指针，lambda表达式，仿函数，std::function初始化thred对象。
+
+{% highlight c++ %}
+
+#include <iostream>
+#include <thread>
+
+using namespace std;
+
+int do_something()
+{
+    cout<<"called function\n";
+    return 0;
+}
+
+auto la = [](){cout<<"called lambda\n";};
+
+struct do_otherthig
+{
+    void operator()()
+    {
+        cout<<"called functor\n";
+    }
+};
+
+auto lb = [](){cout<<"called std::function\n";};
+
+struct func 
+{
+  int& i;
+  func(int& i_) : i(i_) {}
+  void operator() ()
+  {
+    for (unsigned j=0 ; j<1000000 ; ++j)
+    {
+      do_something1(i);// 1. 潜在访问隐患:悬空引用
+    }
+  }
+
+  void do_something1(int &i)
+  {
+      
+  }   
+};
+
+
+void oops() 
+{
+  int some_local_state=0;
+  func my_func(some_local_state);
+  std::thread my_thread(my_func); 
+  my_thread.detach(); // 2. 不等待线程结束
+}// 3. 新线程可能还在运行
+
+int main(int argc, char const *argv[])
+{
+    thread t1(do_something);
+    thread t2(la);
+    thread t3((do_otherthig()));       //传递临时变量，会被解析为函数声明。可以使用多组括号或大括号进行初始化
+    thread t4{function<void(void)>(lb)};
+    t1.join();
+    t2.join();
+    t3.join();
+    t4.join();
+    
+    thread t5(oops);
+    t5.detach();
+    return 0;
+}
+
+<% endhighlight %>
+
+### 2.1.2 等待线程完成
+
+可以使用join函数等待线程完成
+
+
+### 2.1.3 特殊情况下的等待
+
+当线程出现异常是也能够调用到join函数.可以使用try catch进行处理，但和内存泄漏一样，可以使用RAII（资源获取即初始化）进行处理。
+
+{% highlight c++ %}
+
+void func()
+{
+    thread t6(do_something);
+    do_otherthig d1;
+    try
+    {
+        d1();
+    }
+    catch(...)       //出现异常，也要调用join
+    {
+        t6.join();
+        throw;
+    }
+    t6.join();
+}
+{% endhighlight%}
+
+**使用RAII等待线程完成**
+
+{% highlight c++ %}
+
+class thread_guard
+{
+    private:
+      thread& t;
+    public:
+      thread_guard(thread& t_):t(t_)
+      {
+
+      }
+      ~thread_guard()
+      {
+          if(t.joinable())
+          {
+              t.join();
+          }
+      }
+
+      thread_guard(thread_guard const &) = delete;
+      thread_guard& operator = (thread const &) = delete;
+};
+
+void f()
+{
+    thread t7(do_something);
+    do_otherthig d1;
+    thread_guard tg1(t7);
+    d1();
+}
+
+{% endhighlight %}
+
+### 2.1.4 后台运行线程
+
+调用 std::thread 成员函数detach()来分离一个线程。之后,相应的 std::thread 对象就与实际执行的线程无关了,并且这个线程也无法加入。
+
+{% highlight c++ %}
+
+std::thread t(do_background_work);t.detach();assert(!t.joinable());
+
+{% endhighlight %}
