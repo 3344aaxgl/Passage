@@ -102,21 +102,18 @@ public:
   {
       cout<<"called constructor"<<endl;
   }
-  A(A&& a)
+
+  A(const A& a)
   {
-      cout<<"called move constructor"<<endl;  
-      if(&a == this)
-        return ;
-      else
-      {
-      
-      }
+      data = a.data;
+      cout<<"called copy constructor"<<endl;
   }
+
   ~A()
   {
       cout<<"called deconstructor"<<endl;
   }
-private:
+public:
   int data;
 };
 
@@ -139,3 +136,142 @@ int main()
 {% endhighlight %}
 
 两次函数调用都只创建和释放了一个对象，分别创建了a和b，没有建立临时对象。编译器在为目标a，b分配的内存里构造return表达式定义的对象。
+
+## 通过重载避免隐式类型转换
+
+使用重载消除隐式转换，但是每一个重载的operator必须带有一个用户定义类型的参数
+
+{% highlight c++ %}
+
+class UPInt
+{
+public:
+  UPInt(int value):data(value)
+  {
+
+  }
+  friend const UPInt operator+(const UPInt& lhs, const UPInt& rhs);
+  friend const UPInt operator+(const UPInt& lhs, int rhs);
+  friend const UPInt operator+(int lhs, const UPInt& rhs);
+  friend ostream& operator<<(ostream&, const UPInt& rhs);
+private:
+  int data;
+};
+
+const UPInt operator+(const UPInt& lhs, const UPInt& rhs)
+{
+   return UPInt(lhs.data + rhs.data);
+}
+
+const UPInt operator+(const UPInt& lhs, int rhs)
+{
+   return UPInt(lhs.data + rhs);
+}
+
+const UPInt operator+(int lhs, const UPInt& rhs)
+{
+   return UPInt(lhs + rhs.data);
+}
+
+ostream& operator<<(ostream& os, const UPInt& rhs)//函数返回值为右值，必须加上const
+{
+    os << rhs.data;
+    return os;
+}
+
+int main()
+{
+    UPInt u1(1);
+    UPInt u2(2);
+
+    cout<<u1 + u2<<" "<<u1+1<<" "<<2+u2<<endl;
+    return 0;
+}
+{% endlight %}
+
+## 考虑用运算符的赋值形式（op=）取代其单独形式（op）
+
+* 总的来说operator的赋值形式比其单独形式效率更高，因为单独形式要返回一个新对象，从而在临时对象的构造和释放上有一些开销。operator的赋值形式把结果写到左边的参数里，因此不需要生成临时对象来容纳operator的返回值。
+
+* 提供operator的赋值形式的同时也要提供其标准形式，允许类的客户端在便利与效率上做出折衷选择。
+
+{% highlight c++ %}
+
+Rational a, b, c, d, result;
+result = a + b + c + d; // 可能用了3个临时对象 每个operator+ 调用使用1个
+
+result = a; //不用临时对象
+result += b; //不用临时对象
+result += c; //不用临时对象
+result += d; //不用临时对象
+
+{% endhighlight %}
+
+* operator单独形式的实现
+
+{% highlight c++ %}
+//使用返回值优化
+template<class T>
+const T operator+(const T& lhs, const T& rhs)
+{
+ return T(lhs) += rhs; 
+}
+
+//可能编译器不支持命名返回值优化
+template<class T>
+const T operator+(const T& lhs, const T& rhs)
+{
+T result(lhs); // 拷贝lhs 到 result中
+return result += rhs; // rhs与它相加并返回结果
+}
+{% endhighlight %}
+
+## 考虑变更程序库
+
+如果你的程序有I/O瓶颈，你可以考虑用stdio替代iostream，如果程序在动态分配和释放内存上使用了大量时间，你可以想想是否有其他的operator new 和 operator delete的实现可用。
+
+## 理解虚拟函数、多继承、虚基类和RTTI所需的代价
+
+### 虚函数
+
+虚函数由虚函数表和虚函数指针实现。一个vtbl通常是一个函数指针数组。（一些编译器使用链表来代替数组，但是基本方法是一样的）在程序中的每个类只要声明了虚函数或继承了虚函数，它就有自己的vtbl，并且类中vtbl的项目是指向虚函数实现体的指针。
+
+{% highlight c++ %}
+
+class C1 {
+public:
+C1();
+virtual ~C1();
+virtual void f1();
+virtual int f2(char c) const;
+virtual void f3(const string& s);
+void f4() const;
+...
+};
+{% endhighlight %}
+
+C1的virtual table数组看起来如下图所示：
+
+![1.png](1.png "")
+
+* 虚函数所需的第一个代价：你必须为每个包含虚函数的类的virtual talbe留出空间。类的vtbl的大小与类中声明的虚函数的数量成正比
+
+* 虚函数所需的第二个代价是：在每个包含虚函数的类的对象里，你必须为额外的指针付出代价。
+
+![2.png](2.png "")
+
+* 虚函数所需的第三个代价：你实际上放弃了使用内联函数
+
+虚函数不能是内联的。这是因为“内联”是指“在编译期间用被调用的函数体本身来代替函数调用的指令，”但是虚函数的“虚”是指“直到运行时才能知道要调用的是哪一个函数
+
+###多重继承与虚基类
+
+多继承经常导致对虚基类的需求。没有虚基类，如果一个派生类有一个以上从基类的继承路径，基类的数据成员被复制到每一个继承类对象里，继承类与基类间的每条路径都有一个拷贝。程序员一般不会希望发生这种复制，而把基类定义为虚基类则可以消除这种复制。
+
+### 运行时类型识别（RTTI）
+
+我们保证可以获得一个对象动态类型信息，如果该类型有至少一个虚函数。
+
+RTTI被设计为在类的vtbl基础上实现。vtbl数组的索引0处可以包含一个type_info对象的指针，这个对象属于该vtbl
+
+![3.png](3.png "")
