@@ -117,4 +117,107 @@ void foo()
 
 在栈中，pop操作需先判断栈是否为空，然后取值，最后删除节点。但在判断为空与取值之间，取值与删除节点之间，都可能存在条件竞争，所以需要同一互斥量去保护这些操作。而且如果先删除节点，再返回其值时，如果拷贝数据出错，则数据丢失。需要先进行拷贝，然后在删除（RCU）
 
+{% highlight c++ %}
 
+template<typename T>
+class threadsafe_stack
+{
+private:
+    std::stack<T> data;
+    mutable std::mutex m;
+public:
+    threadsafe_stack():data(std::stack<T>())
+    {
+
+    }
+    threadsafe_stack(const threadsafe_stack& other)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        data = other.data;
+    }
+    threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+
+    void push(T new_value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        data.push(new_value);
+    }
+
+    std::shared_ptr<T> pop()
+    {
+        std::lock_guard<std::mutex> lock(m);  
+        if(data.empty()) throw empty_stack();
+
+        std::shared_ptr<T> const res (std::make_shared<T>(data.top()));
+        data.pop();
+        return res;
+    }
+
+    void pop(T& value)
+    {
+        std::lock_guard<std::mutex> lock(m); 
+        if(data.empty()) throw empty_stack();
+
+        value = data.top();
+        data.pop();        
+    }
+    
+    bool empty()
+    {
+        std::lock_guard<std::mutex> lock(m); 
+        return data.empty();
+    }
+};
+{% endhighlight %}
+
+
+### 3.2.4 死锁:问题描述及解决方案
+
+一对线程需要对他们所有的互斥量做一些操作,其中每个线程都有一个互斥量,且等待另一个解锁。这样没有线程能工作,因为他们都在等待对方释放互斥量。这种情况就是死锁,它的最大问题就是由两个或两个以上的互斥量来锁定一个操作。
+
+避免死锁的一般建议,就是让两个互斥量总以相同的顺序上锁:总在互斥量B之前锁住互斥量 A,就永远不会死锁。
+
+但如果两个线程试图在相同的两个实例间进行数据交换时,程序又死锁了!C++标准库有办法解决这个问题, std::lock ——可以一次性锁住多个(两个以上)的 互斥量,并且没有副作用(死锁风险)。
+
+{% highlight c++ %}
+
+class X
+{
+private:
+    int data;
+    std::mutex m;
+public:
+    X(int d):data(d)
+    {
+
+    }
+    friend void swap(X& lhs, X& rhs)
+    {   
+        // 锁定两个互斥而不死锁
+        std::lock(lhs.m, rhs.m);
+        //保证二个已锁定互斥在作用域结尾解锁
+        std::lock_guard<std::mutex> lock_a(lhs.m,std::adopt_lock);
+        std::lock_guard<std::mutex> lock_b(rhs.m,std::adopt_lock);
+
+        std::swap(lhs.data, rhs.data);
+    }
+};
+{% endhighlight %}
+
+std::adopt_lock表示假设调用方线程已拥有互斥的所有权，这样互斥量在作用域结尾能自动解锁
+
+### 3.2.5 避免死锁的进阶指导
+
+* 避免嵌套锁
+
+一个线程已获得一个锁时,再别去获取第二个。当你需要获取多个锁,使用一个 std::lock 来做这件事(对获取锁的操作上锁),避免产生死锁。
+
+* 避免在持有锁时调用用户提供的代码
+
+因为代码是用户提供的,你没有办法确定用户要做什么;用户程序 可能做任何事情,包括获取锁。
+
+* 使用固定顺序获取锁
+
+当硬性条件要求你获取两个以上(包括两个)的锁,并且不能使用 std::lock 单独操作来获取它们;那么最好在每个线程上,用固定的顺序获取它们获取它们(锁)。
+
+* 使用锁的层次结构
