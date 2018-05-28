@@ -221,3 +221,121 @@ std::adopt_lock表示假设调用方线程已拥有互斥的所有权，这样�
 当硬性条件要求你获取两个以上(包括两个)的锁,并且不能使用 std::lock 单独操作来获取它们;那么最好在每个线程上,用固定的顺序获取它们获取它们(锁)。
 
 * 使用锁的层次结构
+
+使用层次锁可以在程序运行时对上锁的顺序进行检测，
+
+{% highlight c++ %}
+//层级互斥量
+class hierarchical_mutex
+{
+private:
+    std::mutex interal_mutex;
+    unsigned long const hierarchy_value;
+    unsigned long previous_hierarchy_value;
+    static thread_local unsigned long this_thread_hierarchy_value;
+    void check_for_hierarchy_violation()
+    {
+        if(this_thread_hierarchy_value <= hierarchy_value)//限制锁的层级
+        {
+            throw std::logic_error("mutex hierarchy violated");
+        } 
+    }
+
+    void update_hierarchy_value()
+    {
+        previous_hierarchy_value = this_thread_hierarchy_value;
+        this_thread_hierarchy_value = hierarchy_value;
+    }
+
+public:
+    explicit hierarchical_mutex(unsigned long value):hierarchy_value(value),previous_hierarchy_value(0)
+    {
+
+    }
+
+    void lock()
+    {
+        check_for_hierarchy_violation();//先检查当前的层次是否大于要锁的层次
+        interal_mutex.lock();
+        update_hierarchy_value();//更新当前层次为锁住的层次
+    }
+
+    void unlock()
+    {
+        this_thread_hierarchy_value = previous_hierarchy_value;//回退到上一个层次
+        interal_mutex.unlock();
+    }
+
+    bool try_lock()
+    {
+        check_for_hierarchy_violation();
+        if(!interal_mutex.try_lock())
+          return false;
+        update_hierarchy_value();
+        return true;
+    }
+};
+
+//每个线程都能独立的拥有这个变量的副本，结合static一起使用，在这个线程中，这个类的所有对象都能按照顺序进行上锁
+thread_local unsigned long hierarchical_mutex::this_thread_hierarchy_value(ULONG_MAX);
+
+
+void Test_hierarchical_mutex()
+{
+    hierarchical_mutex  high_level_lock(1000);
+    hierarchical_mutex  low_level_lock(500);
+    std::lock_guard<hierarchical_mutex> lk1(high_level_lock);//调整顺序报错
+    std::lock_guard<hierarchical_mutex> lk2(low_level_lock);
+    
+    std::cout<<"lock two level lock"<<'\n';
+}
+{% endhighlight %}
+
+### 3.2.6 std::unique_lock——灵活的锁
+
+std::unique允许延迟锁定、锁定的有时限尝试、递归锁定、所有权转移和与条件变量一同使用。
+
+首先，可将std::adopt_lock作为第二个参数传入构造函数，对互斥量进行管理；也可以将std::defer_lock作为第二个参数传递进去，表明互斥量应保持解锁状态
+
+{% highlight c++ %}
+
+class X1
+{
+private:
+    int data;
+    std::mutex m;
+public:
+    X1(int d):data(d)
+    {
+
+    }
+    friend void swap(X1& lhs, X1& rhs)
+    {
+        std::unique_lock<std::mutex> lock_a(lhs.m,std::defer_lock);//仍未取得锁，只是方便解锁
+        std::unique_lock<std::mutex> lock_b(rhs.m,std::defer_lock);
+        std::lock(lock_a, lock_b);//互斥量上锁
+        
+        std::swap(lhs.data, rhs.data);
+    }
+};
+{% endhighlight %}
+
+### 3.2.7 不同域中互斥量所有权的传递
+
+std::mutex既不可复制，也不能移动。而std::unique_lock通过一个指向互斥量的指针来实现移动，可以用来传递互斥量的所有权。
+
+{% highlight c++ %}
+
+std::unique_lock<std::mutex> get_lock()
+{
+    //引用全局变量
+    extern std::mutex some_mutex;
+    std::unique_lock<std::mutex> lk(some_mutex);
+    return lk;
+}
+
+void process_data()
+{
+    std::unique_lock<std::mutex> lk(get_lock());
+}
+{% endhighlight %}
