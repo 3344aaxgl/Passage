@@ -339,3 +339,142 @@ void process_data()
     std::unique_lock<std::mutex> lk(get_lock());
 }
 {% endhighlight %}
+
+## 3.2.8 锁的粒度
+
+锁的粒度是一个摆手术语，用来描述通过一个锁保护着的数据量大小。一个细粒度锁能够保护较小的数据量，一个粗粒度锁能够保护较多的数据量。
+
+{% highlight c++ %}
+
+void get_and_process_data()
+{
+    std::unique_lock<std::mutex> my_lock(the_mutex);
+    some_class data_to_process = get_next_data_chunk();
+    my_lock.unlock();
+    result_type = process(data_to_porcess);
+    my_lock.lock();
+    write_result(data_to_process,result);
+}
+{% endhighlight %}
+
+如果锁的粒度过小，也会出现问题
+
+{% highlight c++ %}
+
+class Y
+{
+  private:
+    int some_detail;
+    mutable std::mutex m;
+    int get_detail() const
+    {
+        std::lock_guard<std::mutex> lock_a(m); // 1
+        return some_detail;
+    }
+
+  public:
+    Y(int sd) : some_detail(sd) {}
+    friend bool operator==(Y const &lhs, Y const &rhs)
+    {
+        if (&lhs == &rhs)
+            return true;
+        int const lhs_value = lhs.get_detail(); // 2
+        int const rhs_value = rhs.get_detail(); // 3
+        return lhs_value == rhs_value;          // 4
+    }
+};
+{% endhighlight %}
+
+步骤2与步骤3都互斥获取了数据，但在执行步骤4时，数据可能已经发生改变，所以这个比较已经失去了意义。
+
+## 3.3 保护共享数据的替代设施
+
+### 3.3.1 保护共享数据的初始化过程
+
+如果共享数据每次初始化都需要加锁，太影响效率，所以出现双重检查锁机制。
+
+{% highlight c++ %}
+
+//双重检查锁机制实现单例模式
+void DCL_Singleton()
+{
+    if(!resource_ptr)
+    {
+        std::lock_guard<std::mutex> lk(some_mutex);
+        if(!resource_ptr)
+        {
+            resource_ptr.reset(new some_data);
+        }
+    }
+
+}
+{% enfhighlight %}
+
+多线程中通过使用双重检查锁机制实现单例模式的问题在于，new操作实际是由两部分组成，第一步由operator new分配空间，然后调用，placemet new在已分配的空间上进行构造。则当空间分配成功，但还未进行构造时，如果这时有其他线程进行指针是否为空的校验，则指针不为空，不会进行对象的创建，直接使用对象，但此时对象还未构造成功。目前c++11可以使用static对象，call_once或者采用双重检查+内存屏障来实现单例模式。
+
+使用static实现单例模式
+
+{% highlight c++ %}
+
+some_data &get_my_class_instance()
+{
+    static some_data instance; // 线程安全的初始化过程
+    return instance;
+}
+{% endhighlight %}
+
+使用call_once进行初始化，如果call_once调用的方法是成员函数，则还需传入相应的对象，类似于thread
+
+{% highlight c++ %}
+
+//使用call_once进行初始化，保证只初始一次
+
+std::once_flag init_flag;
+
+void init_resource()
+{
+    resource_ptr.reset(new some_data);
+}
+
+void CALL_ONCE_init()
+{
+    std::call_once(init_flag, init_resource);
+}
+{% endhighlight %}
+
+
+### 3.3.2 保护很少更新的数据结构
+
+shared_mutex允许两种使用方式：一个“作者”线程独占访问和共享访问，让多个“读者”线程并发访问。
+
+更新操作可以使用lock_guard或者unique_lock来上锁。读操作可以使用shared_lock来上锁
+
+{% highlight c++ %}
+//使用shared_mutex和shared_lock(c++14起)
+class dns_entry;
+class dns_cache
+{
+private:
+    std::map<std::string, dns_entry> entries;
+    mutable boost::shared_mutex entry_mutex;
+public:
+    dns_entry find_entry(std::string const& domain)
+    {
+        boost::shared_lock<boost::shared_mutex> lk(entry_mutex);
+        std::map<std::string,dns_entry>::const_iterator const it= entries.find(domain);
+
+        return (it != entries.end() ? (*it).second:dns_entry()); 
+    }
+
+    void update_or_add_entry(std::string const domain,dns_entry const& dns_details)
+    {
+        entries[domain] = dns_details;
+    }
+};
+
+{% endhighlight %}
+
+### 3.3.3 嵌套锁
+
+std::recursive_mutex，其功能与 std::mutex 类似，除了你可以从同一线程的单个实例上获取多个锁。互斥量锁住其他线程前，你必须释放你拥有的所有锁，所以当你调用lock()三次时，你也必须调用unlock()三次。
+
