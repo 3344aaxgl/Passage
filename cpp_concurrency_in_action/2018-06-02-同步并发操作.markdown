@@ -1,0 +1,184 @@
+---
+layout: post
+title:  "同步并发操作"
+date:   2018-06-02 16:03:51 +0800
+categories: cpp_concurrency_in_action
+tags: c++
+description: cpp concurrency in action读书笔记
+---
+## 4.1 等待一个事件或其他条件
+
+一个条件变量会与多个事件或其他条件相关，并且一个或多个线程会等待条件的达成。当某些线程被终止时，为了唤醒等待线程(允许等待线程继续执行)终止的线程将会向等待着的线程广播“条件达成”的信息。
+
+### 4.1.1 等待条件达成
+
+C++标准库对条件变量有两套实现：`std::condition_variable` 和 `std::condition_variable_any` 。这两个实现都包含在 <condition_variable> 头文件的声明中。两者都需要与一个互斥量一起才能工作(互斥量是为了同步)；前者仅限于与 `std::mutex` 一起工作，而后者可以和任何满足最低标准的互斥量一起工作，从而加上了_any的后缀。因为 `std::condition_variable_any` 更加通用，这就可能从体积、性能，以及系统资源的使用方面产生额外的开销。
+
+{% highlight c++ %}
+
+std::mutex mu;
+std::condition_variable data_cond;
+std::queue<int> data_queue;
+int sum = 0;
+
+auto producer = [](){return (data_queue.size() < 5);};
+
+auto consumer = [](){return (data_queue.size() >= 5);};
+
+void data_producer()
+{
+    while(1)
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        data_cond.wait(lk,producer); //封装之后加上谓词，不用通过while循环处理假唤醒
+        while(data_queue.size() < 5)    //生产者每次生产5个
+        {
+            std::cout <<"producer:"<<sum <<'\n';
+            data_queue.push(sum++);
+        }
+        data_cond.notify_one();//通知消费者
+    }
+}
+
+void data_consumer()
+{
+    while (1)
+    {
+        std::unique_lock<std::mutex> lk(mu);//需要使用unique_lock，wait会对mutex解锁
+        data_cond.wait(lk, consumer);
+        while (data_queue.size() > 0)//消费者全部消费
+        {
+            std::cout << "consumer:" << data_queue.front() << '\n';
+            data_queue.pop();
+        }
+        data_cond.notify_one();//通知生产者
+    }
+}
+{% endhighlight %}
+
+wait()会去检查这些条件(通过调用所提供的lambda函数)，当条件满足(lambda函数返回true)时返回。如果条件不满足(lambda函数返回false)，wait()函数将解锁互斥量，并且将这个线程(上段提到的处理数据的线程)置于阻塞或等待状态。当准备数据的线程调用notify_one()通知条件变量时，处理数据的线程从睡眠状态中苏醒，重新获取互斥锁，并且对条件再次检查，在条件满足的情况下，从wait()返回并继续持有锁。当条件不满足时，线程将对互斥量解锁，并且重新开始等待。
+
+### 4.1.2 使用条件变量构建线程安全队列
+
+队列的三组操作：
+
+* 1.对整个队列的状态进行查询(empty()和size());
+* 2.查询在队列中的各个元素(front()和back());
+* 3.修改队列的操作(push(),pop()和emplace())。
+
+这里我们提供pop()函数的两个变种：try_pop()和wait_and_pop()。try_pop() ，尝试从队列中弹出数据，总会直接返回(当有失败时)，即使没有值可检索；wait_and_pop()，将会等待有值可检索的时候才返回。
+
+{% highlight c++ %}
+
+template<typename T>
+class threadsafe_queue
+{
+private:
+    std::mutex data_mut;
+    std::queue<T> data_queue;
+    std::condition_variable data_cond;
+public:
+    threadsafe_queue(){};
+
+    threadsafe_queue(threadsafe_queue const& other)
+    {
+        std::lock_guard<std::mutex> lock_guard(data_mut);
+        data_queue = other.data_queue;
+    }
+
+    threadsafe_queue& operator=(const threadsafe_queue&) = delete;//不允许简单赋值
+
+    void push(T value);
+
+    bool try_pop(T& value);
+
+    std::shared_ptr<T> try_pop();
+
+    void wait_and_pop(T& value);
+
+    std::shared_ptr<T> wait_and_pop();
+
+    bool empty() const;
+
+};
+
+template<typename T>
+void threadsafe_queue<T>::push(T value)
+{
+    std::lock_guard<std::mutex> lk(data_mut);
+    data_queue.push(value);
+    data_cond.notify_one();//通知等待线程
+}
+
+template<typename T>
+void threadsafe_queue<T>::wait_and_pop(T& value)
+{
+    std::lock_guard<std::mutex> lk(data_mut);
+    data_cond.wait(lk, [this](){return !data_queue.empty();});//队列不为空唤醒
+    value = data_queue.front();
+    data_queue.pop();
+}
+
+template<typename T>
+std::shared_ptr<T> threadsafe_queue<T>::wait_and_pop()
+{
+    std::lock_guard<std::mutex> lk(data_mut);
+    data_cond.wait(lk, [this](){return !data_queue.empty();});
+    std::shared_ptr<T> res = std::make_shared<T>(data_queue.front());
+    data_queue.pop();
+    return res;
+}
+
+template<typename T>
+bool threadsafe_queue<T>::try_pop(T& value)
+{
+    std::lock_guard<std::mutex> lk(data_mut);
+    if(data_queue.empty())
+      return false;
+    value = data_queue.front();
+    data_queue.pop();
+    return true;
+}
+
+template<typename T>
+std::shared_ptr<T> threadsafe_queue<T>::try_pop()
+{
+    std::lock_guard<std::mutex> lk(data_mut);
+    if (data_queue.empty())
+        return std::shared_ptr<T>();
+    std::shared_ptr<T> res(std::make_shared<T>(data_queue.front()));
+    data_queue.pop();
+    return res;
+}
+
+template<typename T>
+bool threadsafe_queue<T>::empty() const
+{
+    return data_queue.empty();
+}
+{% endhighlight %}
+
+## 4.2 使用期望等待一次性事件
+
+在C++标准库中，有两种“期望”，使用两种类型模板实现，声明在头文件中: 唯一期望( std::future<> )和共享期望( std::shared_future<> )。这是仿照 std::unique_ptr 和 std::shared_ptr 。 std::future 的实例只能与一个指定事件相关联，而 std::shared_future 的实例就能关联多个事件。后者的实现中，所有实例会在同时变为就绪状态，并且他们可以访问与事件相关的任何数据。
+
+### 4.2.1 带返回值的后台任务
+
+std::async 会返回一个 std::future 对象，这个对象持有最终计算出来的结果。当你需要这个值时，你只需要调用这个对象的get()成员函数；并且会阻塞线程直到“期望”状态为就绪为止；之后，返回计算结果。
+
+{% highlight c++ %}
+
+template<typename T>
+int parallel_sum(T beg,T end)
+{
+    int len = end - beg;
+    T mid = beg + len/2;
+    if(len < 1000)
+      return std::accumulate(beg,end,0);
+    auto ft = std::async(std::launch::async, parallel_sum<T>, mid, end);
+    int result  = parallel_sum(beg, mid);
+    return result + ft.get();
+}
+{% endhighlight %}
+
+可以在调用函数之前，向std::async传递一个额外参数，这个参数类型是std::launch，可以是std::launch::async，表示启用异步求值，也可以是std::launch::defered，表示惰性求值，用来表明函数调用被延迟到wait()或get()函数调用时才执行。
