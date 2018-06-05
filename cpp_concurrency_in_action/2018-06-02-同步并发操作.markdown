@@ -182,3 +182,40 @@ int parallel_sum(T beg,T end)
 {% endhighlight %}
 
 可以在调用函数之前，向std::async传递一个额外参数，这个参数类型是std::launch，可以是std::launch::async，表示启用异步求值，也可以是std::launch::defered，表示惰性求值，用来表明函数调用被延迟到wait()或get()函数调用时才执行。
+
+除此之外，参数类似thread，可以传入函数，函数对象，lambda表达式，function，传入引用需要加上std::ref。	
+
+### 4.2.2 任务与期望
+
+类模板 std::packaged_task 包装任何可调用 (Callable) 目标（函数、 lambda 表达式、 bind 表达式或其他函数对象），使得能异步调用它。其返回值或所抛异常被存储于能通过 std::future 对象访问的共享状态中。
+
+正如 std::function，std::packaged_task 是多态、具分配器的容器：可在堆上或以提供的分配器分配存储的可调用对象。
+
+
+{% highlight c++ %}
+
+void task_fun()
+{
+    //包装lambda表达式
+    std::packaged_task<int(int,int)> pa([](int a,int b)-> int {return a + b;});
+    std::future<int> ft = pa.get_future();
+    pa(1,2);
+    std::cout<<"lambda:"<<ft.get()<<'\n';
+    
+    //包装bind
+    std::packaged_task<int()> pb(std::bind(add_func,1,2));
+    auto ft1 = pb.get_future();
+    pb();
+    std::cout<<"bind:"<<ft1.get()<<'\n';
+    
+    //通过thread调用
+    std::packaged_task<int(int,int)> pc(add_func);
+    auto ft2 = pc.get_future();
+    std::thread t1(std::move(pc),1,4);
+    t1.join();
+    std::cout<<"thread:"<<ft2.get()<<'\n';
+}
+{% endhighlight %}
+
+
+### 4.2.3 使用std::promises
