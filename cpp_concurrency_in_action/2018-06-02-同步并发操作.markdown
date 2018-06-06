@@ -219,3 +219,111 @@ void task_fun()
 
 
 ### 4.2.3 使用std::promises
+
+在线程函数中给外面传进来的promise赋值，当线程函数执行完成之后就可以通过promis获取该值了，值得注意的是取值是间接的通过promise内部提供的future来获取的。
+
+
+{% highlight c++ %}
+void promise_func()
+{
+    std::promise<int> p;
+    std::future<int> ft = p.get_future();
+    std::thread t([](std::promise<int>& p){p.set_value(1);},std::ref(p));
+    t.join();
+    std::cout<<"promise:"<<ft.get()<<'\n';
+}
+{% endhighlight %}
+
+std::async可以直接进行异步操作，而std::packaged_stak需要包装一个执行目标，然后由std::thread进行一步调用，std::promise可以由线程外传入并在线程中给其赋值，以上三者都可以通过std::future获取返回值
+
+### 4.2.4 为“期望”存储“异常”
+
+函数作为 std::async 的一部分时,当在调用时抛出一个异常,那么这 个异常就会存储到“期望”的结果数据中,之后“期望”的状态被置为“就绪”,之后调用get()会抛 出这个存储的异常。
+
+{% highlight c++ %}
+void async_exception()
+{
+    auto lam = [](double d)-> double{if(d < 0){throw std::out_of_range("d<0");}return d;};
+    std::future<double> ft = std::async(std::launch::async,lam,-1);
+    ft.get();
+}
+{% endhighlight %}
+
+当打包函数抛出一个异常,这个异常将被存储在“期望”的结果中,准备在调用get()再次抛出。
+
+{% highlight c++ %}
+void packaged_task_exception()
+{
+    std::packaged_task<double(double)> pt(lam);
+    std::future<double> ft = pt.get_future();
+    std::thread t(std::move(pt),-1);
+    t.join();
+    ft.get();
+}
+{% endhighlight %}
+
+通过函数的显式调用, std::promise 也能提供同样的功能。
+
+{% highlight c++ %}
+std::promise<double> p;
+
+auto plam = [](double d)-> double {if(d < 0){p.set_exception(std::current_exception());}return d;};
+
+void promise_excettion()
+{
+    std::future<double> ft = p.get_future();
+    std::thread t(plam,-1);
+    t.join();
+    ft.get();
+}
+{% endhighlight %}
+
+### 4.2.5 多个线程的等待
+
+类模板 std::shared_future 提供访问异步操作结果的机制，类似 std::future ，除了允许多个线程等候同一共享状态。不同于仅可移动的 std::future （故只有一个实例能指代任何特定的异步果），std::shared_future 可复制而且多个 shared_future 对象能指代同一共享状态。
+
+若每个线程通过其自身的 shared_future 对象副本访问，则从多个线程访问同一共享状态是安全的。
+
+{% highlight c++ %}
+
+void shared_future_func()
+{
+    std::promise<void> ready_promise,t1_ready_promise,t2_ready_promise;
+    std::shared_future<void> ready_future(ready_promise.get_future());
+    std::chrono::time_point<std::chrono::high_resolution_clock> start;
+
+    auto fun1 = [&, ready_future]() -> std::chrono::duration<double, std::milli> 
+    {
+        t1_ready_promise.set_value();
+        ready_future.wait();
+        return std::chrono::high_resolution_clock::now() - start;
+    };
+
+    auto fun2 = [&, ready_future]() -> std::chrono::duration<double, std::milli> 
+    {
+        t2_ready_promise.set_value();
+        ready_future.wait();
+        return std::chrono::high_resolution_clock::now() - start;
+    };
+
+    auto result1 = std::async(std::launch::async, fun1);
+    auto result2 = std::async(std::launch::async, fun2);
+
+    //线程已经准备好
+    t1_ready_promise.get_future().wait();
+    t2_ready_promise.get_future().wait();
+
+    // 线程已就绪，开始时钟
+    start = std::chrono::high_resolution_clock::now();
+
+    //向线程发送信号，使之运行
+    ready_promise.set_value();
+
+    std::cout << "Thread 1 received the signal "
+              << result1.get().count() << " ms after start\n"
+              << "Thread 2 received the signal "
+              << result2.get().count() << " ms after start\n";
+
+}
+
+{% endhighlight %}
