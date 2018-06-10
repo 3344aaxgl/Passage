@@ -327,3 +327,70 @@ void shared_future_func()
 }
 
 {% endhighlight %}
+
+
+## 4.3 限定等待时间
+
+两种指定的超时方式:一种是“时延”的超时方式,另一种是“绝对”超时方式。第一种方式,需要指定一段时间(例如,30毫秒);第二种方式,就是指定一个时间点
+
+### 4.3.1 时钟
+
+时钟是一个类,提供了四种不同的信息:
+* 现在时间* 时间类型* 时钟节拍* 通过时钟节拍的分布,判断时钟是否稳定
+
+时钟的当前时间可以通过调用静态成员函数now()从时钟类中获取;例如,std::chrono::system_clock::now() 是将返回系统时钟的当前时间。特定的时间点类型可以通过time_point的数据typedef成员来指定,所以some_clock::now()的类型就是some_clock::time_point。
+
+时钟节拍被指定为1/x(x在不同硬件上有不同的值)秒,这是由时间周期所决定——一个时钟一秒有25个节拍,因此一个周期为 std::ratio<1, 25> 
+
+std::chrono::system_clock 是不稳定的,因为时钟是可调的,即是这种是完全自动适应本地账户的调节。
+
+C++标准库提供一个稳定时钟 std::chrono::steady_clock。
+
+std::chrono::high_resolution_clock 可能是标准库中提供的具有最小节拍周期(因此具有最高的精度[分辨率])的时钟。
+
+### 4.3.2 时延
+
+std::chrono::duration<> 函数模板能够对时延进行处理。第一个模板参数是一个类型表示(比如,int,long或double),第二个模板参数是制定部分,表示每一个单元所用秒数。
+
+标准库在 std::chrono 命名空间内,为延时变量提供一系列预定义类型:nanoseconds[纳秒] , microseconds[微秒] , milliseconds[毫秒] , seconds[秒] , minutes[分]和hours[时]。
+
+{% highlight c++ %}
+
+std::chrono::seconds sec(1);
+typedef std::chrono::duration<float,std::ratio<60,1>> mins; //这里不能用int
+//无精度损失
+std::cout<<"1 sec is "<<mins(sec).count()<<"min"<<'\n';
+//有精度损失
+std::cout<<"1 sec is "<<std::chrono::duration_cast<std::chrono::minutes>(sec).count()<<"min"<<'\n';
+
+std::future<int> f=std::async(some_task);
+//等待35毫秒if(f.wait_for(std::chrono::milliseconds(35))==std::future_status::ready)  do_something_with(f.get());
+
+{% endhighlight %}
+
+### 4.3.3 时间点
+
+时钟的时间点可以用 std::chrono::time_point<> 的类型模板实例来表示,实例的第一个参数用来指定所要使用的时钟,第二个函数参数用来表示时间的计量单位(特化的 std::chrono::duration<> )。
+
+可以通过 std::chrono::time_point<> 实例来加/减时延,来获得一个新的时间点,所以 std::chrono::hight_resolution_clock::now() + std::chrono::nanoseconds(500) 将得到500纳秒后的时间。
+
+{% highlight c++ %}
+bool wait_loop()
+{
+    std::unique_lock<std::mutex> lk(mu);
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(500);
+    while(!done)
+    {
+        if(data_cond.wait_until(lk,end) == std::cv_status::timeout);
+          break;
+    }
+    return done;
+}
+{% endhighlight %}
+
+### 4.3.4 具有超时功能的函数
+
+C++标准库中支持超时的函数
+
+![](5.png)
+![](6.png)
