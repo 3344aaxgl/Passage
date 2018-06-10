@@ -1,0 +1,255 @@
+---
+layout: post
+title:  "技巧"
+date:   2018-06-10 11:22:51 +0800
+categories: cpp_concurrency_in_action
+tags: c++
+description: cpp concurrency in action读书笔记
+---
+
+## 灵巧（smart）指针
+
+当你使用灵巧指针替代C++的内建指针,你就能控制下面这些方面的指针的行为：
+
+* 构造和析构
+* 拷贝和赋值
+
+实现auto_ptr时需注意，这里实际是移动拷贝，导致拷贝构造函数和赋值运算符不能传入const引用。且作为函数入参时，只能以引用的形式。
+
+{% highlight c++ %}
+
+template<typename T>
+class my_auto_ptr
+{
+private:
+    T* pointee;
+public:
+    my_auto_ptr(T* p = 0):pointee(p){}
+
+    my_auto_ptr(my_auto_ptr&& mp):pointee(mp.pointee)//不能传入const，会对原有的对象进行更改,这里使用折叠引用
+    {
+        mp.pointee = 0;
+    }
+
+    my_auto_ptr& operator=(my_auto_ptr& mp)//不能传const，理由同上
+    {
+        if(this == &mp)
+           return *this;
+        delete pointee;
+        pointee = mp.pointee;
+        mp.pointee = 0;
+        return *this;
+    }
+
+    ~my_auto_ptr
+    {
+        delete pointee;
+    }
+};
+
+template<typename T>
+void printTreeNode(ostream &s, auto_ptr<T>& p)//只能传引用，因为拷贝构造函数会对对象进行改动
+{
+    s << *p;
+}
+{% endhighlight %}
+
+* Dereferencing(取出指针所指东西的内容)
+
+{% highlight c++ %}
+
+T& operator*() const//这里返回引用是因为pointee可能是指向继承类的指针，如果返回对象，则可能导致问题
+{
+    return *pointee;
+}
+
+T* operator->() const
+{
+    return pointee;
+}
+
+{% endhighlight %}
+
+* 测试灵巧指针是否为NULL
+
+要使得灵巧指针的行为和内建指针类似，可以增加转换到void*指针的转换函数或者重载!符号。
+
+隐式转换成void*会导致不同类型的灵巧指针也能比较
+{% highlight c++ %}
+operator void*()
+{
+    return static_cast<void*>(pointee);
+}
+
+my_auto_ptr<int> mp ;
+if(!mp)
+  cout<<"mp is nullptr"<<endl;
+
+if(mp);
+
+if(!mp);
+//如果是内建指针，两个不同类型的指针是无法比较的，但这里都隐式转换成了void*
+my_auto_ptr<double> md;
+if(mp == md);
+{% endhighlight %}
+
+重载!符号无法解决两个不同类型灵巧指针使用!再进行比较
+{% highlight c++ %}
+operator !()
+{
+    return (pointee == nullptr);
+} 
+if(!mp == !md);   
+{% endhighlight %}
+
+* 把灵巧指针转变成dumb指针
+
+通过隐式类型转换，可以将灵巧指针转换成内建指针，但这样使得可以修改内建指针，同时这种转换只能进行一次，在需要进行多次转换的情况下会失效。
+
+{% highlight c++ %}
+
+operator T *()
+{
+    return pointee;
+}
+
+class TupleAccessors {
+public:
+TupleAccessors(const int *pt);
+
+};
+
+//需要先转换成int*,然后再通过构造函数转换成TupleAccessors，但c++只支持转换一次
+TupleAccessors merged(const TupleAccessors& ta1,const TupleAccessors& ta2)
+{
+
+}
+{% endhighlight %}
+
+所以，除非有一个让人非常信服的原因去这样做，否则绝对不要提供转换到dumb指针的隐式类型转换操作符。
+
+* 灵巧指针和继承类到基类的类型转换
+
+派生类的内建指针可以转换到基类的内建指针，而对于灵巧指针，完全是两个不同的类型，所以无法直接转换。可以增加模板成员函数，进行隐式类型转换
+
+{% highlight c++ %}
+
+class Base
+{
+public:
+    Base()
+    {
+        cout<<"Base constructor"<<'\n';
+    }
+};
+
+class Derived:public Base
+{
+public:
+    Derived()
+    {
+
+    }
+    Derived(const Derived& d)
+    {
+
+    }
+};
+
+template<typename Other>
+operator my_auto_ptr<Other>()
+{
+    //通过调用另一个模板类的构造函数来实现隐式转换
+    return my_auto_ptr<Other>(pointee);
+}
+
+my_auto_ptr<Derived> mpd;
+
+//这里经过RVO，只会调用默认构造函数，但在编译的时候会检查是否符合拷贝构造函数，
+//如果拷贝构造函数入参是左引用，但实际传入的是个右值，则不匹配。所以利用引用折叠，将入参改为右值引用
+//这样既可以支持左值，也可以支持右值
+
+my_auto_ptr<Base> mb = mpd;
+{% endhighlight %}
+
+这种类型转换不单单可以支持有继承关系的对象，可以成功地用于任何合法的指针类型转换。
+
+但是如果对象被继承了多次，那么对于内建指针，会“就近”转换，而灵巧指针却不会。
+
+{% highlight c++ %}
+
+class DerivedDerived:public Derived
+{
+
+};
+
+void displayAndPlay(const Base* b)
+{
+    cout<<"Base"<<endl;
+}
+
+void displayAndPlay(const Derived*)
+{
+    cout<<"derived"<<endl;
+}
+
+void displayAndPlay(const my_auto_ptr<Base>& mb)
+{
+
+}
+
+void displayAndPlay(const my_auto_ptr<Derived>& md)
+{
+
+}
+
+my_auto_ptr<DerivedDerived> mdd;
+//存在二义性
+// displayAndPlay(mdd);
+
+DerivedDerived* dd;
+
+//调用Derived版的
+displayAndPlay(dd);
+
+{% endhighlight %}
+
+无法让灵巧指针的行为与dumb指针一样。
+
+* 灵巧指针和const
+
+对于dumb指针来说，const既可以针对指针所指向的东西，也可以针对于指针本身，或者兼有两者的含义。灵巧指针也可以有类似的对象，但使用dumb指针我们能够用non-const指针初始化const指针，我们也能用指向non-cosnt对象的指针初始化指向const对象的指针。
+
+带const的类型转换是单向的：从non-const到const的转换是安全的，但是从const到non-const则不是安全的。而且用const指针能做的事情，用non-const指针也能做，但是用non-const指针还能做其它一些事情（例如，赋值操作）。同样，用指向const对象的指针能做的任何事情，用指向non-const对象的指针也能做到，但是用指向non-const对象的指针能够完成一些指向const对象的指针所不能完成的事情（例如，赋值操作）。这些规则看起来与public继承的规则相类似。可以通过让每个指向T的灵巧指针类public派生自一个对应的指向const-T的灵巧指针类。
+
+{% highlight c++ %}
+template <class T> // 指向const对象的
+class SmartPtrToConst
+{ // 灵巧指针
+    // 成员函数
+  protected:
+    union 
+    {
+        const T *constPointee; // 让 SmartPtrToConst 访问
+        T *pointee;            // 让 SmartPtr 访问
+    };
+};
+template <class T> // 指向non-const对象
+class SmartPtr : public SmartPtrToConst<T>
+{
+public:
+    SmartPtr(T* p){SmartPtrToConst<T>::pointee = p;}
+};
+
+Base pb;
+
+my_auto_ptr<Base> mp1 ;                        //non-const对象，non-const指针
+my_auto_ptr<const Base> mp2;                   //const对象，non-const指针
+const my_auto_ptr<Base> mp3 = &pb;             //non-const对象，const指针
+const my_auto_ptr<const Base> mp4 = &pb;       //const对象，const指针
+
+SmartPtr<int> pCD = new int();
+SmartPtrToConst<int> pConstCD = pCD; // 正确
+{% endhighlight %}
+
+为了防止同时拥有两个内建指针空间，这里使用union，同一个空间，两个指针。
