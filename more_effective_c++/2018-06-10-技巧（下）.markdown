@@ -11,8 +11,8 @@ description: cpp concurrency in action读书笔记
 
 当你使用灵巧指针替代C++的内建指针,你就能控制下面这些方面的指针的行为：
 
-* 构造和析构
-* 拷贝和赋值
+### 构造和析构
+### 拷贝和赋值
 
 实现auto_ptr时需注意，这里实际是移动拷贝，导致拷贝构造函数和赋值运算符不能传入const引用。且作为函数入参时，只能以引用的形式。
 
@@ -54,7 +54,7 @@ void printTreeNode(ostream &s, auto_ptr<T>& p)//只能传引用，因为拷贝�
 }
 {% endhighlight %}
 
-* Dereferencing(取出指针所指东西的内容)
+### Dereferencing(取出指针所指东西的内容)
 
 {% highlight c++ %}
 
@@ -70,7 +70,7 @@ T* operator->() const
 
 {% endhighlight %}
 
-* 测试灵巧指针是否为NULL
+### 测试灵巧指针是否为NULL
 
 要使得灵巧指针的行为和内建指针类似，可以增加转换到void*指针的转换函数或者重载!符号。
 
@@ -102,7 +102,7 @@ operator !()
 if(!mp == !md);   
 {% endhighlight %}
 
-* 把灵巧指针转变成dumb指针
+### 把灵巧指针转变成dumb指针
 
 通过隐式类型转换，可以将灵巧指针转换成内建指针，但这样使得可以修改内建指针，同时这种转换只能进行一次，在需要进行多次转换的情况下会失效。
 
@@ -128,7 +128,7 @@ TupleAccessors merged(const TupleAccessors& ta1,const TupleAccessors& ta2)
 
 所以，除非有一个让人非常信服的原因去这样做，否则绝对不要提供转换到dumb指针的隐式类型转换操作符。
 
-* 灵巧指针和继承类到基类的类型转换
+### 灵巧指针和继承类到基类的类型转换
 
 派生类的内建指针可以转换到基类的内建指针，而对于灵巧指针，完全是两个不同的类型，所以无法直接转换。可以增加模板成员函数，进行隐式类型转换
 
@@ -216,7 +216,7 @@ displayAndPlay(dd);
 
 无法让灵巧指针的行为与dumb指针一样。
 
-* 灵巧指针和const
+### 灵巧指针和const
 
 对于dumb指针来说，const既可以针对指针所指向的东西，也可以针对于指针本身，或者兼有两者的含义。灵巧指针也可以有类似的对象，但使用dumb指针我们能够用non-const指针初始化const指针，我们也能用指向non-cosnt对象的指针初始化指向const对象的指针。
 
@@ -253,3 +253,91 @@ SmartPtrToConst<int> pConstCD = pCD; // 正确
 {% endhighlight %}
 
 为了防止同时拥有两个内建指针空间，这里使用union，同一个空间，两个指针。
+
+## 引用计数
+
+引用计数是这样一个技巧，它允许多个有相同值的对象共享这个值的实现。这个技巧有两个常用动机。第一个是简化跟踪堆中的对象的过程。第二个动机是如果很多对象有相同的值，将这个值存储多次是很无聊的。更好的办法是让所有的对象共享这个值的实现。这么做不但节省内存，而且可以使得程序运行更快，因为不需要构造和析构这个值的拷贝。
+
+### 实现引用计数
+
+string类实现引用计数可以将字符串指针与计数成员组合一个类，string类包含这个新类的指针。构造，拷贝构造，赋值时计数增加（赋值要注意原引用减少），析构时引用计数减少，如果计数为0则彻底删除。
+
+{% highlight c++ %}
+
+class my_string
+{
+private:
+    struct stringvalue
+    {
+        char* data;
+        int refCount;
+        stringvalue(const char* initvalue = "");
+        ~stringvalue();
+    };
+    stringvalue* value;
+public:
+    my_string(const char* initvalue = ""):value(new stringvalue(initvalue))
+    {
+        ++value->refCount;
+    }
+    
+    ~my_string()
+    {
+        if (--value->refCount == 0)
+            delete value;
+    }
+
+    my_string(const my_string& ms):value(ms.value)
+    {
+         ++value->refCount;
+    }
+
+    my_string& operator=(const my_string& ms)
+    {
+        if(this == &ms)
+            return *this;
+        if(--value->refCount == 0)
+            delete value;
+        value = ms.value;
+        ++value->refCount;
+        return *this;
+    }
+}; 
+
+my_string::stringvalue::stringvalue(const char* initvalue)
+{
+    data = new char[strlen(initvalue)+1];
+    strcpy(data,initvalue);
+}
+
+my_string::stringvalue::~stringvalue()
+{
+    delete [] data;
+}
+{% endhighlight %}
+
+### 写时拷贝
+
+在只读时，可以直接加上const限制条件，表明不修改成员。如果可以修改的版本，那么就需要根据引用计数的情况决定是否需要创建新的成员。
+
+{% highlight c++ %}
+
+//不会修改对象
+const char& operator[](int index) const
+{
+    return value->data[index];
+}
+
+//如果引用大于1，说明还有其他对象包含此指针，所以创建新的指针
+char& operator[](int index)
+{
+    //如果
+    if(value->refCount > 1)
+    {
+        --value->refCount;
+        value = new stringvalue(value->data);
+    }
+    return value->data[index];
+}
+
+{% endhighlight %}
