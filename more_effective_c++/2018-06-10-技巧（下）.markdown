@@ -341,3 +341,340 @@ char& operator[](int index)
 }
 
 {% endhighlight %}
+
+### 指针、引用与写时拷贝
+
+如果有成员函数返回了指向字符串成员的指针，那么就可以通过这个指针去修改这个字符串。可以加入一个标志是否能够进行共享的标志，在返回了指向字符串的指针后就无法在进行共享了。
+
+{% highlight c++ %}
+
+//构造函数默认是可共享的
+my_string(const char* initvalue = ""):value(new stringvalue(initvalue))
+{
+    ++value->refCount;
+    value->shareable = true;
+}
+//拷贝构造函数和赋值运算符要根据能否共享来决定是否创建新的字符串空间
+my_string(const my_string &ms)
+{
+if (!ms.value->shareable)
+    value = ms.value;
+else
+    value = new stringvalue(ms.value->data);
+++value->refCount;
+}
+
+my_string& operator=(const my_string& ms)
+{
+if(this == &ms)
+    return *this;
+if(--value->refCount == 0)
+    delete value;
+if(ms.value->shareable)
+   value = ms.value;
+else
+   value = new stringvalue(ms.value->data);
+++value->refCount;
+return *this;
+}
+//返回指向字符串的指针则关闭共享
+char& operator[](int index)
+{
+    if(value->refCount > 1)
+    {
+        --value->refCount;
+        value = new stringvalue(value->data);
+    }
+    value->shareable = false;
+    return value->data[index];
+}
+{% endhighlight %}
+
+
+### 带引用计数的基类
+
+将计数操作放在基类中，后续的对象继承此类，也就实现了计数操作。
+
+{% highlight c++ %}
+
+class RCObject
+{
+  private:
+    int refCOunt;
+    bool shareable;
+
+  public:
+    RCObject() : refCOunt(0), shareable(true) {}
+
+    ~RCObject() {}
+
+    void addreference()
+    {
+        ++refCOunt;
+    }
+
+    void removereference()
+    {
+        if(--refCOunt == 0)
+          delete this;
+    }
+
+    void markUnshareable()
+    {
+        shareable = false;
+    }
+
+    bool Isshareable()
+    {
+        return shareable;
+    }
+
+    bool Isshared()
+    {
+        return refCOunt > 1;
+    }
+};
+
+{% endhighlight %}
+
+### 自动的引用计数处理
+
+当对字符串成员进行拷贝指针、给指针赋值和销毁指针操作时，引用计数字段也要发生相应的变化。这里可以使用灵巧指针。
+
+{% highlight c++ %}
+
+template <typename T>
+class RCPtr
+{
+  private:
+    T *pointee;
+    void init();
+  public:
+    RCPtr(T *realPtr = 0):pointee(realPtr)
+    {
+        init();
+    }
+    RCPtr(const RCPtr &rhs):pointee(rhs.pointee)
+    {
+        init();
+    }
+    //如果已无引用，则将被删除
+    virtual ~RCPtr() = 0
+    {
+        pointee->removereference();
+    }
+    //如果不允许共享，这需要创建新的字符串
+    RCPtr &operator=(const RCPtr &rhs)
+    {
+        if(pointee != rhs.pointee)
+        {
+            if(pointee)
+              pointee->removereference();
+            pointee = rhs.pointee;
+            init();
+        }
+        return *this;
+    }
+    T *operator->() const
+    {
+        return pointee;
+    }
+    T &operator*() const
+    {
+        return *pointee;
+    }  
+};
+
+template<typename T>
+void RCPtr<T>::init()
+{
+    if(pointee == 0)
+      return ;
+    if(pointee->Isshareable() == false)
+      pointee = new T(*pointee);
+    pointee->addreference();
+}
+{% endhighlight %}
+
+### 合在一起
+
+使用上述类，创建包含引用计数的string
+
+{% highlight c++ %}
+
+class my_RCstring
+{
+  private:
+    struct stringvalue : public RCObject
+    {   
+        char* data;
+        //构造函数只是分配空间，计数和共享在基类中处理
+        stringvalue(const char *initvalue = "")
+        {
+            data = new char[strlen(initvalue) +1];
+            strcpy(data,initvalue);
+        }
+
+        stringvalue(const stringvalue& str)
+        {
+            data = new char[strlen(str.data) +1];
+            strcpy(data,str.data);
+        }
+
+        ~stringvalue()
+        {
+            delete [] data;
+        }
+    };
+    RCPtr<stringvalue> value;
+  public:
+    my_RCstring(const char* initvalue):value(new stringvalue(initvalue))
+    {
+
+    }
+    
+    const char & operator[](int index) const
+    {
+        //转换成stringvalue
+        return value->data[index];
+    }
+    //支持修改，所以创建新的字符串
+    char & operator[](int index)
+    {
+        if (value->Isshared())
+        {
+            value = new stringvalue(value->data);
+        }
+        value->markUnshareable();
+        return value->data[index];
+    }
+};
+{% endhighlight %}
+
+### 在现存类上增加引用计数
+
+因为无法让类去包含灵巧指针，也无法继承计数类，所以可以创建一个新的类，包含灵巧指针。灵巧指针模板里包含有从计数基类继承而来的类对象的指针，从计数基类继承而来的类中包含有要增加引用计数类对象的指针。
+
+![5.PNG](5.PNG)
+
+{% highlight c++ %}
+
+template <class T>
+class RCIPtr
+{
+  public:
+    RCIPtr(T *realPtr = 0);
+    RCIPtr(const RCIPtr &rhs);
+    ~RCIPtr();
+    RCIPtr &operator=(const RCIPtr &rhs);
+    const T *operator->() const; // see below for an
+    T *operator->();             // explanation of why
+    const T &operator*() const;  // these functions are
+    T &operator*();              // declared this way
+  private:
+    struct CountHolder : public RCObject
+    {
+        ~CountHolder() { delete pointee; }
+        T *pointee;
+    };
+    CountHolder *counter;
+    void init();
+    void makeCopy(); // see below
+};
+template <class T>
+void RCIPtr<T>::init()
+{
+    if (counter->isShareable() == false)
+    {
+        T *oldValue = counter->pointee;
+        counter = new CountHolder;
+        counter->pointee = new T(*oldValue);
+    }
+    counter->addReference();
+}
+template <class T>
+RCIPtr<T>::RCIPtr(T *realPtr)
+    : counter(new CountHolder)
+{
+    counter->pointee = realPtr;
+    init();
+}
+template <class T>
+RCIPtr<T>::RCIPtr(const RCIPtr &rhs)
+    : counter(rhs.counter)
+{
+    init();
+}
+template <class T>
+RCIPtr<T>::~RCIPtr()
+{
+    counter->removeReference();
+}
+template <class T>
+RCIPtr<T> &RCIPtr<T>::operator=(const RCIPtr &rhs)
+{
+    if (counter != rhs.counter)
+    {
+        counter->removeReference();
+        counter = rhs.counter;
+        init();
+    }
+    return *this;
+}
+template <class T>         // implement the copy
+void RCIPtr<T>::makeCopy() // part of copy-on-
+{                          // write (COW)
+    if (counter->isShared())
+    {
+        T *oldValue = counter->pointee;
+        counter->removeReference();
+        counter = new CountHolder;
+        counter->pointee = new T(*oldValue);
+        counter->addReference();
+    }
+}
+template <class T>                     // const access;
+const T *RCIPtr<T>::operator->() const // no COW needed
+{
+    return counter->pointee;
+}
+template <class T>         // non-const
+T *RCIPtr<T>::operator->() // access; COW
+{
+    makeCopy();
+    return counter->pointee;
+} // needed
+template <class T>                    // const access;
+const T &RCIPtr<T>::operator*() const // no COW needed
+{
+    return *(counter->pointee);
+}
+template <class T>        // non-const
+T &RCIPtr<T>::operator*() // access; do the
+{
+    makeCopy();
+    return *(counter->pointee);
+} // COW thing
+
+class Widget
+{
+  public:
+    Widget(int size);
+    Widget(const Widget &rhs);
+    ~Widget();
+    Widget &operator=(const Widget &rhs);
+    void doThis();
+    int showThat() const;
+};
+
+class RCWidget
+{
+  public:
+    RCWidget(int size) : value(new Widget(size)) {}
+    void doThis() { value->doThis(); }
+    int showThat() const { return value->showThat(); }
+
+  private:
+    RCIPtr<Widget> value;
+};
+{% endhighlight %}
