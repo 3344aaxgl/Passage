@@ -678,3 +678,146 @@ class RCWidget
     RCIPtr<Widget> value;
 };
 {% endhighlight %}
+
+## 代理类
+
+**实现二维数组**
+
+通过代理类实现一维数组，然后由二维数组包含指向此一维数组指针。
+
+{% highlight c++ %}
+
+template <typename T>
+class Array2D
+{
+  public:
+    class Array1D
+    {
+      public:
+        const T& operator[](int index) const
+        {
+            return *(t+index);
+        }
+
+        T& operator[](int index)
+        {
+            return *(t+index);
+        }
+
+        Array1D(int s = 0):size(s),t(nullptr)
+        {
+            if(s != 0)
+              t = new T[size];
+        }
+
+        ~Array1D()
+        {
+            if(t)
+              delete [] t;
+        }
+
+      private:
+        int size;
+        T* t;
+    };
+
+    const Array1D& operator[](int index) const
+    {
+        return *(*(a+index));
+    }
+
+    Array1D& operator[](int index)
+    {
+        return *(*(a+index));
+    } 
+
+    Array2D(int row ,int col):size(row)
+    {
+        a = new Array1D*[size];
+        for(int i = 0;i < size; i++)
+          a[i] = new Array1D(col);
+    }
+
+    ~Array2D()
+    {
+        for(int i = 0;i < size; i++)
+          delete a[i];
+        delete [] a;
+    }
+
+    private:
+      Array1D** a;
+      int size;
+};
+{% endhighlight %}
+
+**区分通过operator[]进行的是读操作还是写操作**
+
+类String重载[]函数返回代理类对象，然后代理类中重载=和隐式转换，调用重载=函数说明是作为左值使用，调用隐式转换说明是作为右值使用，这样就把[]是用作读还是写操作分开了。这里是将区分延迟到了真正使用operator[]返回值的时候
+
+{% highlight c++ %}
+
+class String
+{
+  public:
+    String(const char* s)
+    {
+        len = strlen(s) +1;
+        str = new char[len];
+        strcpy(str,s);
+    }
+    
+    ~String()
+    {
+        len = 0;
+        delete []str;
+    }
+    class CharProxy
+    {
+      public:
+        CharProxy(String& str,int num):string(str),index(num)
+        {
+
+        }
+
+        CharProxy& operator=(const CharProxy& rhs)
+        {
+          string.str[index] = rhs.string.str[rhs.index];
+        }
+
+        CharProxy& operator=(char c)
+        {
+            string.str[index] = c;
+        }
+
+        operator char()
+        {
+            return string.str[index];
+        }
+      private:
+        String& string;
+        int index;
+    };
+
+    const CharProxy operator[](int in) const
+    {
+        return (CharProxy(const_cast<String&>(*this), in));
+    }
+
+    CharProxy operator[](int in)
+    {
+        return (CharProxy(*this,in));
+    }
+    friend class CharProxy;
+  private:
+    char* str;
+    unsigned int len;
+};
+{% endhihlight %}
+
+**局限性**
+
+因为operator[]不在返回char，所以之前所有能对char执行的操作都需要在代理类中重新定义。而且c++对于隐式转换只会进行一次，所以可能会导致调用失败。
+
+
+Proxy类可以完成一些其它方法很难甚至不可能实现的行为。多维数组是一个例子，左/右值的区分是第二个，限制隐式类型转换是第三个。同时，proxy类也有缺点。作为函数返回值，proxy对象是临时对象，它们必须被构造和析构。这不是免费的，虽然此付出能从具备了区分读写的能力上得到更多的补偿。Proxy对象的存在增加了软件的复杂度，因为额外增加的类使得事情更难设计、实现、理解和维护。
