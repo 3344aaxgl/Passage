@@ -2,9 +2,9 @@
 layout: post
 title:  "技巧"
 date:   2018-06-10 11:22:51 +0800
-categories: cpp_concurrency_in_action
+categories: more_effective_c++
 tags: c++
-description: cpp concurrency in action读书笔记
+description: more effective c++读书笔记
 ---
 
 ## 灵巧（smart）指针
@@ -821,3 +821,243 @@ class String
 
 
 Proxy类可以完成一些其它方法很难甚至不可能实现的行为。多维数组是一个例子，左/右值的区分是第二个，限制隐式类型转换是第三个。同时，proxy类也有缺点。作为函数返回值，proxy对象是临时对象，它们必须被构造和析构。这不是免费的，虽然此付出能从具备了区分读写的能力上得到更多的补偿。Proxy对象的存在增加了软件的复杂度，因为额外增加的类使得事情更难设计、实现、理解和维护。
+
+## 让函数根据一个以上的对象来决定怎么虚拟
+
+c++虚函数体系只能作用在一个对象身上，当需要根据多个对象决定调用函数时，C++没有提供这样的函数。
+
+**用虚函数加RTTI**
+
+根据第一个对象调用虚函数，实现第一重调用，然后在虚函数中根据typeid获取传入参数的正在类型，然后依据不同的类型进行不同的处理，这样实现第二重调用。
+
+{% highlight c++ %}
+
+class GameObject
+{
+  public:
+    virtual void collide(GameObject& otherObject) = 0;
+};
+
+class CollisionWithUnknownObject
+{
+  public:
+    CollisionWithUnknownObject(GameObject &whatWeHit)
+    {
+        
+    }
+};
+
+
+class SpaceStation;
+class Asteroid;
+
+class SpaceShip : public GameObject
+{
+  public:
+    virtual void collide(GameObject &otherObject);
+};
+
+void SpaceShip::collide(GameObject &otherObject)
+{
+    const type_info &objectType = typeid(otherObject);
+    if (objectType == typeid(SpaceShip))
+    {
+        SpaceShip &ss = static_cast<SpaceShip &>(otherObject);
+        //process a SpaceShip - SpaceShip collision;
+    }
+    else if (objectType == typeid(SpaceStation))
+    {
+        SpaceStation &ss = static_cast<SpaceStation &>(otherObject);
+        //process a SpaceShip - SpaceStation collision;
+    }
+    else if (objectType == typeid(Asteroid))
+    {
+        Asteroid &a = static_cast<Asteroid &>(otherObject);
+        //process a SpaceShip - Asteroid collision;
+    }
+    else
+    {
+        throw CollisionWithUnknownObject(otherObject);
+    }
+}
+{% endhighlight %}
+
+代价是放弃了封装，因为每个collide函数都必须知道所以其它同胞类中的版本。尤其是，如果增加一个新的类时，我们必须更新每一个基于RTTI的if...then...else链以处理这个新的类型。
+
+**只使用虚函数**
+
+collide函数被申明为虚，并被所有派生类重定义，此外，它还被每个类重载，每个重载处理一个派生类型：
+
+{% highlight c++ %}
+
+class SpaceShip1; // forward declarations
+class SpaceStation1;
+class Asteroid1;
+class GameObject1
+{
+  public:
+    virtual void collide(GameObject1 &otherObject) = 0;
+    virtual void collide(SpaceShip1 &otherObject) = 0;
+    virtual void collide(SpaceStation1 &otherObject) = 0;
+    virtual void collide(Asteroid1 &otherobject) = 0;
+};
+class SpaceShip1 : public GameObject1
+{
+  public:
+    virtual void collide(GameObject1 &otherObject);
+    virtual void collide(SpaceShip1 &otherObject);
+    virtual void collide(SpaceStation1 &otherObject);
+    virtual void collide(Asteroid1 &otherobject);
+};
+
+void SpaceShip1::collide(GameObject1& otherObject)
+{
+  otherObject.collide(*this);
+}
+
+void SpaceShip1::collide(SpaceShip1& otherObject)
+{
+  //process collide with SpaceShip1
+}
+
+void SpaceShip1::collide(SpaceStation1& otherObject)
+{
+  //process collide with SpaceStation1
+}
+
+void SpaceShip1::collide(Asteroid1& otherObject)
+{
+  //process collide with Asteroid1
+}
+{% endhighlight %}
+
+在参数为基类索引的虚函数中，通过入参再次调用碰撞函数，这时调用的是真正处理碰撞的函数，而且因为入参*this是正在的碰撞对象类型，所以不会循环调用。
+
+但每次新增对象时，仍需要重新编译。
+
+**模拟虚函数表**
+
+创建一个映射表，将给定的类名对应恰当的成员函数指针。在调用时，通过RTTI信息获取类名，然后到映射表中寻找真正的调用函数。这里map中的存入的函数指针类型要一致，所以真正的处理函数入参仍为基类引用，所以处理时需要通过dynamic_cast将其转换成具体的类型。
+
+{% highlight c++ %}
+class GameObject_vtbl
+{
+  public:
+    virtual void collide(GameObject_vtbl& otherObject) = 0;
+};
+
+class CollisionWithUnknownObject_vtbl
+{
+  public:
+    CollisionWithUnknownObject_vtbl(GameObject_vtbl &whatWeHit)
+    {
+
+    }
+};
+
+class SpaceStation_vtbl;
+class Asteroid_vtbl;
+
+class SpaceShip_vtbl : public GameObject_vtbl
+{
+  private:
+    typedef void (SpaceShip_vtbl::*HitFunctionPtr)(GameObject_vtbl &);
+    typedef map<string, HitFunctionPtr> HitMap;
+    static HitMap * initializeCollisionMap();
+  public:
+    void collide(GameObject_vtbl &otherObject);
+    void hitSpaceShip_vtbl(GameObject_vtbl &otherObject);
+    void hitSpaceStation_vtbl(GameObject_vtbl &otherObject);
+    void hitAsteroid_vtbl(GameObject_vtbl &otherObject);
+    static HitFunctionPtr lookup(const GameObject_vtbl &whatWeHit);
+};
+
+void SpaceShip_vtbl::collide(GameObject_vtbl &otherObject)
+{
+  HitFunctionPtr hfp = lookup(otherObject);
+  if(hfp)
+    (this->*hfp)(otherObject);
+  else
+    throw CollisionWithUnknownObject_vtbl(otherObject);
+}
+
+void SpaceShip_vtbl::hitSpaceShip_vtbl(GameObject_vtbl& otherObject)
+{
+    SpaceShip_vtbl& otherShip = dynamic_cast<SpaceShip_vtbl&>(otherObject);
+    //process a SpaceShip-SpaceShip collision;
+}
+
+void SpaceShip_vtbl::hitSpaceStation_vtbl(GameObject_vtbl& otherObject)
+{
+    //SpaceStation_vtbl& otherStation = dynamic_cast<SpaceStation_vtbl&>(otherObject);
+    //process a SpaceShip-SpaceStation collision;
+}
+
+void SpaceShip_vtbl::hitAsteroid_vtbl(GameObject_vtbl& otherObject)
+{
+    //Asteriod_vtbl& otherAsteriod = dynamic_cast<Asteriod_vtbl&>(otherObject);
+    //process a SpaceShip-Asteroid collision;
+}
+
+SpaceShip_vtbl::HitFunctionPtr
+SpaceShip_vtbl::lookup(const GameObject_vtbl &whatWeHit)
+{
+    static shared_ptr<HitMap> collisionMap (initializeCollisionMap());
+    HitMap::iterator mapEntry = (*collisionMap).find(typeid(whatWeHit).name());
+    if (mapEntry == (*collisionMap).end())
+        return 0;
+    return (*mapEntry).second;
+}
+
+SpaceShip_vtbl::HitMap *SpaceShip_vtbl::initializeCollisionMap()
+{
+    HitMap *phm = new HitMap;
+    (*phm)["SpaceShip"] = &hitSpaceShip_vtbl;
+    (*phm)["SpaceStation"] = &hitSpaceStation_vtbl;
+    (*phm)["Asteroid"] = &hitAsteroid_vtbl;
+    return phm;
+}
+{% endhighlight %}
+
+**使用非成员的碰撞处理函数**
+
+这样每次增加新类的时候还是需要全部重新编译。可以将所有的处理函数写成非成员函数。
+
+{% highlight c++ %}
+void shipAsteroid(GameObject& spaceShip,GameObject& asteroid);
+{% endhighlight %}
+
+其余相关处理都弄成非成员，这样新增类型时只需要在这里面增加类型就可以，不用所有的类型都重新编译
+
+**继承与模拟虚函数表**
+
+如果spaceship存在两个继承类，同时这两个类的碰撞处理都是一致的，所以希望能够复用之前spaceship的处理函数。但在lookup函数中却无法通过这两个继承类查找出对应的函数。上述这种情况就只能使用之前说的需要重新编译的方法。
+
+**初始化模拟虚函数表（再次讨论）**
+
+确保在发生碰撞前就将映射关系加入了映射表。一个方法是让GameObject的子类在构造函数中进行确认。这将导致在运行期的一个小小的性能开销。另外一个方法是创建一个RegisterCollisionFunction 类。
+
+{% highlight c++ %}
+
+class RegisterCollisionFunction
+{
+  public:
+    RegisterCollisionFunction(
+        const string &type1,
+        const string &type2,
+        CollisionMap::HitFunctionPtr collisionFunction,
+        bool symmetric = true)
+    {
+        CollisionMap::theCollisionMap().addEntry(type1, type2,
+                                                 collisionFunction,
+                                                 symmetric);
+    }
+};
+
+RegisterCollisionFunction cf1("SpaceShip", "Asteroid",&shipAsteroid);
+{% endhighlight %}
+
+这样就可以自动注册所需的函数。
+
+
+****

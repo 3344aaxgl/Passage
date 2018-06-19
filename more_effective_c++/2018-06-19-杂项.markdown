@@ -1,0 +1,95 @@
+---
+layout: post
+title:  "杂项"
+date:   2018-06-19 21:05:51 +0800
+categories: more_effective_c++
+tags: c++
+description: more effective c++读书笔记
+---
+
+## 在未来时态下开发程序
+
+基于最小惊讶法则：努力提供这样的类，它们的操作和函数有自然的语法和直观的语义。和内建数据类型的行为保持一致：拿不定主意时，仿照int来做。
+
+努力于可移植的代码。
+
+将你的代码设计得当需要变化时，影响是局部的。尽可能地封装；将实现细节申明为私有。
+
+如果一个公有基类没有虚析构函数，所有的派生类基其成员函数都不应该有析构函数。
+
+如果多重继承体系有许多析构函数，每个基类都应该有应该虚析构函数。    
+
+## 将非尾端类设计为抽象类
+
+## 如何在同一程序中混合使用C++和C
+
+**名变换**
+
+名变换，就是C++编译器给程序的每个函数换一个独一无二的名字。在C中，这个过程是不需要的，因为没有函数重载。
+
+要禁止名变换，使用C++的extern 'C'指示：
+
+{% highlight c++ %}
+
+extern "C"
+void drawLine(int x1, int y1, int x2, int y2);
+{% endhighlight %}
+
+如果不幸到必须要用汇编写一个函数，你也可以申明它为extern 'C'：
+
+{% highlight c++ %}
+
+extern "C" void simulate(int iterations);
+{% endhighlight %}
+extern 'C'可以对一组函数生效，只要将它们放入一对大括号中：
+
+{% highlight c++ %}
+
+extern "C" 
+{
+   // disable name mangling for
+   // all the following functions
+   void drawLine(int x1, int y1, int x2, int y2);
+   void twiddleBits(unsigned char bits);
+   void simulate(int iterations);
+
+}
+{% endhighlight %}
+
+当用C++编译时，你应该加extern 'C'，但用C编译时，不应该这样。通过只在C++编译器下定义的宏__cplusplus，你可以将头文件组织得这样：
+
+{% highlight c++ %}
+#ifdef __cplusplus
+extern "C" {
+#endif
+  void drawLine(int x1, int y1, int x2, int y2);
+  void twiddleBits(unsigned char bits);
+  void simulate(int iterations);
+
+#ifdef __cplusplus
+}
+#endif
+
+{% endhighlight %}
+
+**静态初始化**
+
+在main执行前和执行后都有大量代码被执行。尤其是，静态的类对象和定义在全局的、命名空间中的或文件体中的类对象的构造函数通常在main被执行前就被调用。这个过程称为静态初始化
+
+**动态内存分配**
+
+：C++部分使用new和delete（参见Item M8），C部分使用malloc（或其变形）和free。只要new分配的内存使用delete释放，malloc分配的内存用free释放。
+
+**数据结构的兼容性**
+
+将在两种语言间传递的东西限制在用C编译的数据结构的范围内；这些结构的C++版本可以包含非虚成员函数。
+
+## Item M35：让自己习惯使用标准C++语言
+
+* 增加了新的特性：RTTI、命名空间、bool，关键字mutable和explicit，对枚举的重载操作，已及在类的定义中初始化const static成员变量。
+* 模板被扩展了：现在允许了成员模板，增加了强迫模板实例化的语法，模板函数允许无类型参数，模板类可以将它们自己作为模板参数。
+* 异常处理被细化了：异常规格申明在编译期被进行更严格的检查，unexpected()函数现在可以抛一个bad_exception对象了。
+* 内存分配函数被改良了：增加了operator new[]和operator delete[]函数，operator new/new[]在内存分配失败时将抛出一个异常，并有一个返回为0（不抛
+异常）的版本供选择。（见Effective C++ Item 7）
+* 增加了新的类型转换形式：static_cast、dynamic_cast、const_cast，和reinterpret_cast。
+* 语言规则进行了重定义：重定义一个虚函数时，其返回值不需要完全的匹配了（如果原来返回基类对象或指针或引用，派生类可以返回派生类的对象、指针或引用），临时对象的生存期进行了精确地定义。
