@@ -1,0 +1,255 @@
+---
+layout: post
+title:  "基于锁的并发数据结构设计"
+date:   2018-06-20 14:40:51 +0800
+categories: cpp_concurrency_in_action
+tags: c++
+description: cpp concurrency in action读书笔记
+---
+
+## 为并发设计的意义何在？
+
+要为线程提供并发访问数据结构的机会。本质上，是使用互斥量提供互斥特性：在互斥量的保护下，同一时间内只有一个线程可以获取互斥锁。互斥量为了保护数据，显式的阻止了线程对数据结构的并发访问。
+
+### 数据结构并发设计的指导与建议(指南)
+
+在第3章的时候，已经对如何保证数据结构是线程安全的做过简单的描述：
+
+* 确保无线程能够看到，数据结构的“不变量”破坏时的状态。
+* 小心那些会引起条件竞争的接口，提供完整操作的函数，而非操作步骤。
+* 注意数据结构的行为是否会产生异常，从而确保“不变量”的状态稳定。
+* 将死锁的概率降到最低。使用数据结构时，需要限制锁的范围，且避免嵌套锁的存在。
+
+## 基于锁的并发数据结构
+
+基于锁的并发数据结构设计，需要确保访问线程持有锁的时间最短。
+
+### 线程安全栈——使用锁
+
+{% highlight c++ %}
+struct empty_stack : public std::exception
+{
+  const char* what() const throw(){};
+}; 
+
+template <typename T>
+class threadsafe_stack
+{
+  private:
+    std::stack<T> data;
+    mutable std::mutex m;  //mutable标志说明在const成员函数中仍可以改变此变量 
+  public:
+    threadsafe_stack()
+    {
+
+    }
+
+    threadsafe_stack(const threadsafe_stack& otherstack)
+    {
+        std::lock_guard<std::mutex> lock(otherstack.m);
+        data = otherstack.data;
+    }
+
+    threadsafe_stack& operator=(const threadsafe_stack&) = delete;
+
+    void push(T new_value);
+    std::shared_ptr<T> pop();
+    void pop(T& value);
+    bool empty() const;
+};
+
+template<typename T>
+void threadsafe_stack<T>::push(T new_value)
+{
+    std::lock_guard<std::mutex> lock(m);
+    data.push(std::move(new_value));
+}
+
+template<typename T>
+std::shared_ptr<T> threadsafe_stack<T>::pop()
+{
+    std::lock_guard<std::mutex> lock(m);
+    if(data.empty())
+      throw empty_stack();
+    std::shared_ptr<T> const res(std::make_shared<T>(std::move(data.top())));
+    data.pop();
+    return res;
+}
+
+template<typename T>
+void threadsafe_stack<T>::pop(T& value)
+{
+    std::lock_guard<std::mutex> lock(m);
+    if(data.empty())
+      throw empty_stack();
+    value = std::move(data.top());
+    data.pop();
+}
+
+template<typename T>
+bool threadsafe_stack<T>::empty() const
+{
+    std::lock_guard<T> lock(m);
+    return data.empty();
+}
+
+{% endhighlight %}
+
+当一个线程在等待锁时，它就会无所事事。同样的，对于栈来说，等待添加元素也是没有意义的，所以当一个线程需要等待时，其会定期检查empty()或pop()，以及对empty_stack异常进行关注。这样的现实会限制栈的实现的方式，在线程等待的时候，会浪费宝贵的资源去检查数据，或是要求用户写写外部等待和提示代码。
+
+### 线程安全队列——使用锁和条件变量
+
+{% highlight c++ %}
+
+template <typename T>
+class threadsafe_queue
+{
+  private:
+    std::queue<T> data;
+    std::mutex m;
+    std::condition_variable data_cond;
+  public:
+    threadsafe_queue()
+    {
+
+    }
+
+    threadsafe_queue(const threadsafe_queue<T>& sq)
+    {
+        std::lock_guard<std::mutex> lock(sq.m);
+        data = sq.data;
+    }
+
+    threadsafe_queue& operator= (const threadsafe_queue<T>& sq) = delete;
+
+    void push(T new_value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        data.push(new_value);
+        data_cond.notify_one();
+    }
+
+    bool wait_and_pop(T& value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        //谓词为假，则挂起线程，并解锁互斥量，被唤醒后，获取互斥量并再次判断谓词
+        data_cond.wait(m,[this](){return !data.empty();});
+        value = std::move(data.front());
+        data.pop();
+    }
+
+    std::shared_ptr<T> wait_and_pop()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        data_cond.wait(m,[this](){return !data.empty();});
+
+        std::shared_ptr<T> res(std::make_shared<T>(std::move(data.front())));
+        return res;
+    }
+
+    bool try_pop(T& value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty())
+          return false;
+        value = std::move(data.front());
+        return false;        
+    }
+
+    std::shared_ptr<T> try_pop()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty())
+          return std::shared_ptr<T>();
+
+        std::shared_ptr<T> res(std::make_shared<T>(std::move(data.front())));
+        return res;        
+    }
+
+    bool empty()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        return data.empty();
+    }
+
+};
+{% endhighlight %}
+
+比起持续调用empty()，等待线程调用wait_and_pop()函数和数据结构处理等待中的条件变量的方式要好很多。对于data_cond.wait()的调用，直到队列中有一个元素的时候，才会返回，所以你就不用担心会出现一个空队列的情况了，还有，数据会一直被互斥锁保护。因为不变量这里并未发生变化，所以函数不会添加新的条件竞争或是死锁的可能。
+
+{% highlight c++ %}
+
+template <typename T>
+class threadsafe_queue_shared_ptr
+{
+  private:
+    std::queue<std::shared_ptr<T>> data;
+    std::mutex m;
+    std::condition_variable data_cond;
+  public:
+    threadsafe_queue_shared_ptr()
+    {
+
+    }
+
+    threadsafe_queue_shared_ptr& operator= (const threadsafe_queue_shared_ptr& sq) = delete;
+
+    void push(T new_value)
+    {
+        std::shared_ptr<T> temp(std::make_shared<T>(std::move(new_value)));
+        std::lock_guard<std::mutex> lock(m);
+        data.push(temp);
+        data_cond.notify_one();
+    }
+
+    bool wait_and_pop(T& value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        //谓词为假，则挂起线程，并解锁互斥量，被唤醒后，获取互斥量并再次判断谓词
+        data_cond.wait(m,[this](){return !data.empty();});
+        value = std::move(*data.front());
+        data.pop();
+        return true;
+    }
+
+    std::shared_ptr<T> wait_and_pop()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        data_cond.wait(m,[this](){return !data.empty();});
+
+        std::shared_ptr<T> res = data.front();
+        data.pop();
+        return res;
+    }
+
+    bool try_pop(T& value)
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty())
+          return false;
+        value = std::move(*data.front());
+        data.pop();
+        return false;        
+    }
+
+    std::shared_ptr<T> try_pop()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if(data.empty())
+          return std::shared_ptr<T>();
+
+        std::shared_ptr<T> res = data.front();
+        data.pop();
+        return res;        
+    }
+
+    bool empty()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        return data.empty();
+    }
+};
+
+{% endhighlight %}
+
+将 std::shared_ptr<> 的初始化过程移到push()中，并且存储 std::shared_ptr<> 实例，而非直接使用数据的值。将 std::shared_ptr<> 拷贝到内部 std::queue<> 中，就不会抛出异常了，这样wait_and_pop()又是安全的了
