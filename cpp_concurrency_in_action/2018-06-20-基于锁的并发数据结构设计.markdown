@@ -252,4 +252,303 @@ class threadsafe_queue_shared_ptr
 
 {% endhighlight %}
 
-将 std::shared_ptr<> 的初始化过程移到push()中，并且存储 std::shared_ptr<> 实例，而非直接使用数据的值。将 std::shared_ptr<> 拷贝到内部 std::queue<> 中，就不会抛出异常了，这样wait_and_pop()又是安全的了
+将 std::shared_ptr<> 的初始化过程移到push()中，并且存储 std::shared_ptr<> 实例，而非直接使用数据的值。将 std::shared_ptr<> 拷贝到内部 std::queue<> 中，就不会抛出异常了，这样wait_and_pop()又是安全的了。
+
+### 线程安全队列——使用细粒度锁和条件变量
+
+{% highlight c++ %}
+
+template<typename T>
+class queue_singnal
+{
+  private:
+    struct node
+    {
+        T data;
+        std::unique_ptr<node> next;
+        node(T value):data(std::move(value))
+        {
+
+        }
+    };
+    
+    //自动释放
+    std::unique_ptr<node> head;
+    node* tail;
+  public:
+    queue_singnal()
+    {
+
+    }
+
+    queue_singnal(const queue_singnal& ) = delete;
+    queue_singnal& operator=(const queue_singnal&) = delete;
+
+    std::shared_ptr<T> try_pop()
+    {
+        if(!head)
+        {
+            return std::shared_ptr<T>();
+        }
+
+        std::shared_ptr<T> res(std::make_shared<T>(std::move(head->data)));
+        std::unique_ptr<node> old_head = std::move(head);                  //自动删除
+        head = std::move(old_head->next);
+        return res;
+    }
+
+    void push(T value)
+    {
+        std::unique_ptr<node> new_node(new node(std::move(value)));
+        if(tail)
+          tail->next = std::move(new_node);
+        else
+          head = std::move(new_node);
+        tail = new_node;
+    }
+};
+{% endhighlight %}
+
+在多线程下，即使头尾指针分别用不同的互斥量锁住，当队列中只有一个元素时，头尾指针指向同一个元素，读取和插入操作无法互斥进行。
+
+这里可以通过加入一个空对象来解决，初始时，head和tail指向这个空对象；插入时，空对象存入新值，tail指向一个新的空值；取出时，如果tail和head相等，则说明是初始化的情况，直接退出，否则取出数据。插入操作只需要获取tail指针，获取指针需要获得head和tail，但对tail只是读操作，所以获取的tail的值要么是插入之前的要么是插入之后的。
+
+{% highlight c++ %}
+
+//带虚拟节点可等待线程安全队列
+template <typename T>
+class threadsafe_queue_virtual
+{
+  private:
+    struct node
+    {
+        std::shared_ptr<T> data;
+        std::unique_ptr<node> next;
+    };
+    std::unique_ptr<node> head;
+    node* tail;
+    std::mutex head_mutex;
+    std::mutex tail_mutex;
+    std::condition_variable data_cond;
+
+    node* get_tail()
+    {
+        std::lock_guard<std::mutex> lock(tail_mutex);
+        return tail;
+    }
+
+    std::unique_ptr<node> pop_head()
+    {
+        std::unique_ptr<node> old_head = std::move(head);//head不指向链表
+        head = std::move(old_head->next);//old_head->next不指向链表，head指向新的头结点
+        return old_head;        
+    }
+
+    std::unique_ptr<node> try_pop_head()
+    {
+        std::lock_guard<std::mutex> lock(head_mutex);
+        //这里get_tail执行完后释放tail_mutex，tail可能因插入操作而发生改变
+        //即此时head和tail已不相等，但此等式为真。可以在try_pop_head外层增加while循环
+        //这样最大化并发
+        if(head.get() == get_tail())
+        {
+            return std::unique_ptr<node>();
+        }
+        return pop_head();
+    }
+
+    std::unique_ptr<node> try_pop_head(T& value)
+    {
+        std::lock_guard<std::mutex> lock(head_mutex);
+        if(head.get() == get_tail())
+        {
+            return std::unique_ptr<node>();            
+        }
+        value = std::move(*head->data);
+        return pop_head();
+    }
+
+    std::unique_lock<std::mutex> wait_for_data()
+    {
+        std::unique_lock<std::mutex> lock(head_mutex);
+        data_cond.wait(lock,[&](){return head.get() != get_tail();});
+        //mutex不可移动和赋值，但unique_lock可以
+        return std::move(lock);
+    }
+
+    std::unique_ptr<node> wait_pop_head()
+    {
+        std::unique_lock<std::mutex> lock = wait_for_data();
+        return pop_head();
+    }
+
+    std::unique_ptr<node> wait_pop_head(T& value)
+    {
+        std::unique_lock<std::mutex> lock = wait_for_data();
+        value = std::move(*head->data);
+        return pop_head();
+    }
+
+  public:
+    threadsafe_queue_virtual():head(new node),tail(head.get())
+    {
+    }
+
+    threadsafe_queue_virtual(const threadsafe_queue_virtual &) = delete;
+    threadsafe_queue_virtual &operator=(const threadsafe_queue_virtual &) = delete;
+
+    std::shared_ptr<T> try_pop();
+    bool try_pop(T &value);
+    std::shared_ptr<T> wait_and_pop();
+    void wait_and_pop(T &value);
+    void push(T new_value);
+    void empty();
+};
+
+template<typename T>
+void threadsafe_queue_virtual<T>::push(T new_value)
+{
+    std::unique_ptr<node> p(new node());
+    std::shared_ptr<T> new_node(std::make_shared<T>(std::move(new_value))); 
+    std::lock_guard<std::mutex> lock(tail_mutex);
+    tail->data = new_node;
+    node* new_tail = p.get();
+    tail->next = std::move(p);//使用右值，否则空间将被p释放
+    tail = new_tail;
+}
+
+template<typename T>
+std::shared_ptr<T> threadsafe_queue_virtual<T>::try_pop()
+{
+    std::unique_ptr<node> old_head = try_pop_head();
+    return old_head?*old_head->data:std::shared_ptr<T>();
+}
+
+template<typename T>
+bool threadsafe_queue_virtual<T>::try_pop(T& value)
+{
+    std::unique_ptr<node>const old_head = try_pop_head(value);
+    return old_head != nullptr;
+}
+
+template<typename T>
+void threadsafe_queue_virtual<T>::empty()
+{
+    std::lock_guard<std::mutex> lock(head_mutex);
+    return head.get() == get_tail();
+}
+
+template<typename T>
+std::shared_ptr<T> threadsafe_queue_virtual<T>::wait_and_pop()
+{
+    std::unique_ptr<node> const old_head = wait_pop_head();
+    return old_head->data;
+}
+
+template<typename T>
+void threadsafe_queue_virtual<T>::wait_and_pop(T& value)
+{
+    std::unique_ptr<node> const old_head = wait_pop_head(value);
+}
+{% endhighlight %}
+
+## 基于锁设计更加复杂的数据结构
+
+### 编写一个使用锁的线程安全查询表
+
+* 二叉树的方式，不会对提高并发访问的概率；每一个查找或者修改操作都需要访问根节点，因此，根节点需要上锁。虽然，访问线程在向下移动时，这个锁可以进行释放，但相比横跨整个数据结构的单锁，并没有什么优势。
+* 有序数组是最坏的选择，因为你无法提前言明数组中哪段是有序的，所以你需要用一个锁将整个数组锁起来。
+* 那么就剩哈希表了。假设有固定数量的桶，每个桶都有一个键值(关键特性)，以及散列函数。这就意味着你可以安全的对每个桶上锁。当你再次使用互斥量(支持多读者单作者)时，你就能将并发访问的可能性增加N倍，这里N是桶的数量。
+
+{% highlight c++ %}
+
+template<typename Key,typename Value,typename Hash = std::hash<Key>>
+class threadsafe_lookup_table
+{
+  private:
+    class bucket_type
+    {
+      private:
+        typedef std::pair<Key,Value> bucket_value;
+        typedef std::list<bucket_value> bucket_data;
+        typedef typename bucket_data::iterator bucket_iterator;
+
+        bucket_data data;
+        mutable std::shared_mutex mutex;
+
+        bucket_iterator find_entry_for(Key const& key)
+        {
+           return std::find_if(data.begin(),data.end(),[&](bucket_value const & item){return item.first == key;});
+        }
+      public:
+        Value value_for(Key const& key,Value const& default_value)
+        {
+            std::shared_lock<std::shared_mutex> lock(mutex);
+            bucket_iterator found_entry = find_entry_for(key);
+            return found_entry == data.end()?default_value:found_entry->second;
+        }
+
+        void add_or_update_mapping(Key const& key,Value const&value)
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            bucket_iterator found_entry = find_entry_for(key);
+            if(found_entry == data.end())
+            {
+                data.push_back(bucket_value(key,value));
+            }
+            else
+              found_entry->second = value;
+        }
+
+        void remove_mapping(Key const& key)
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            bucket_iterator found_entry = find_entry_for(key);
+            if(found_entry != data.end())
+              data.erase(found_entry);
+        }
+    };
+    std::vector<std::unique_ptr<bucket_type>> buckets;
+    Hash hasher;
+
+    bucket_type& get_bucket(Key const & key)
+    {
+        std::size_t const bucket_index = hasher(key)%buckets.size();
+        return *buckets[bucket_index]; 
+    }
+  public:
+    typedef Key   key_type;
+    typedef Value mapped_type;
+    typedef Hash  hash_type;
+
+    threadsafe_lookup_table(unsigned num_buckets = 19,Hash const& hasher_ = Hash())
+    :buckets(num_buckets),hasher(hasher_)
+    {
+      for(unsigned i = 0;i < num_buckets; i++)
+      {
+          buckets[i].reset(new bucket_type);
+      }
+    }
+
+    threadsafe_lookup_table(const threadsafe_lookup_table&) = delete;
+    threadsafe_lookup_table& operator=(const threadsafe_lookup_table&) = delete;
+
+    Value value_for(Key const& key,Value const value = Value())
+    {
+        return get_bucket(key).value_for(key,value);
+    }
+
+    void add_or_update_mapping(Key const& key, Value const& value)
+    {
+        get_bucket(key).add_or_update_mapping(key,value);
+    }
+
+    void remove_mapping(Key const& key)
+    {
+        get_bucket(key).remove_mapping(key);
+    }
+};
+{% endhighight %}
+
+### 编写一个使用锁的线程安全链表
+
