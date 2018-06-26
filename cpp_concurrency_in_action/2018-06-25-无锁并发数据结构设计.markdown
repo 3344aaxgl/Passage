@@ -66,3 +66,160 @@ class spinlock_mutex
 3. 让head节点指向新节点。
 
 当有两个线程同时添加节点的时候，在第2步和第3步的时候会产生条件竞争：一个线程可能在修改head的值时，另一个线程正在执行第2步，并且在第3步中对head进行更新。这就会使之前那个线程的工作被丢弃，亦或是造成更加糟糕的后果。
+
+{% highlight c++ %}
+
+template<typename T>
+class lock_free_stack
+{
+  private:
+    struct node
+    {
+        std::shared_ptr<T> data;
+        node* next;
+
+        node(T value):data(std::make_shared<T>(value))
+        {
+
+        }
+    };
+    std::atomic<node*> head;
+  public:
+    void push(T value)
+    {
+        node* const new_node = new node(value);
+        new_node->next = head.load();
+        while(!head.compare_exchange_weak(new_node->next,new_node));
+    }
+
+    std::shared_ptr<T> pop()
+    {
+        node* old_head = head.load();
+        while(old_head && head.compare_exchange_strong(old_head,old_head->next));
+        return old_head?old_head->data:std::shared_ptr<T>();
+    }
+};
+{% endhighlight %}
+
+无锁并不是没有等待，插入和取出操作都是类似于自旋锁，没有成功就再次循环去做，直到操作成功。
+
+### 停止内存泄露：使用无锁数据结构管理内存
+
+无锁操作有一个问题就是存在内存泄露。push操作插入节点后就和这个没有关系了，而pop操作需要将节点的空间释放，如果要释放的节点还有其他线程在使用，则会出现问题。所以要在没有其他线程引用该节点的情况下删除。
+
+{% highlight c++ %}
+
+//通过引用计数解决内存泄露的无锁队列
+template<typename T>
+class lock_free_stack_by_referencecount
+{
+  private:
+    struct node
+    {
+        std::shared_ptr<T> data;
+        node* next;
+
+        node(T value):data(std::make_shared<T>(value))
+        {
+
+        }
+    };
+    static void delete_nodes(node* nodes)
+    {
+        while(nodes)
+        {
+            node* next = nodes->next;
+            delete nodes;
+            nodes = next;
+        }
+    }
+
+    void chain_pending_nodes(node* first,node* last)
+    {
+        last->next = to_be_deleted.load();
+        while(to_be_deleted.compare_exchange_weak(last->next,first));
+    }
+
+    void chain_pending_nodes(node* nodes)
+    {
+        node* first = nodes;
+        node* last = first;
+        while(nodes)
+        {
+            last = nodes;
+            nodes = nodes->next;
+        }
+        chain_pending_nodes(first,last);
+    }
+
+    void chain_pending_node(node* nodes)
+    {
+        chain_pending_nodes(nodes,nodes);
+    }
+
+    void try_reclaim(node* old_head)
+    {
+        if(threads_in_pop == 1)
+        {
+            node * nodes_to_delete = to_be_deleted.exchange(nullptr);
+            //这里需要在校验一次是因为如果在第一次校验和原子操作之间，有其他的节点加入待删除
+            //链表中，而这里不再次进行判断的话，那这个新加入的节点可能会出现内存泄露
+            //只要有一个瞬间，引用计数为1，那就说明该节点没有其他人引用了
+            if(!--threads_in_pop)
+            {
+                delete_nodes(nodes_to_delete);
+            }
+            else
+            {
+                chain_pending_nodes(nodes_to_delete);
+            }
+            delete old_head;
+        }
+        else
+        {
+            chain_pending_node(old_head);
+            --threads_in_pop;
+        }
+    }
+    std::atomic<node*> head;
+    std::atomic<unsigned> threads_in_pop;
+    std::atomic<node*> to_be_deleted;
+  public:
+    void push(T value)
+    {
+        node* new_node = new node(value);
+        new_node->next = head.load();
+        while(!head.compare_exchange_weak(new_node->next, new_node));
+    }
+
+    std::shared_ptr<T> pop()
+    {
+        //操作之前，先将计数增加,使用前置自增，效率更高
+        ++threads_in_pop;
+        node* old_head = head.load();
+        while(old_head && !head.compare_exchange_weak(old_head,old_head->next));
+        std::shared_ptr<T> res;
+        if(old_head)
+        {
+            res.swap(old_head->data);
+        }
+        try_reclaim(old_head);
+        return res;      
+    }
+
+    ~lock_free_stack_by_referencecount()
+    {
+        node* old_head = head.load();
+        node* next_node = p->next
+
+        while(old_head);
+        {
+           delete old_head;
+           old_head = next_node;
+           next_node = next_node->next;
+        }
+    }
+};
+{% endhighlight %}
+
+使用引用计数来避免内存泄露效率不如风险指针，因为引用计数是只要当前有线程在进行pop操作就将其放入待删除链表，而风险指针是将指针与节点挂钩，只要节点没有风险指针指向，就可以删除。
