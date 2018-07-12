@@ -565,3 +565,92 @@ class lock_free_stack_by_referencecount
 
 ### 应用于无锁栈上的内存模型
 
+通过使用非序列一致序列，来实现无锁栈。详细说明见代码
+
+{% highlight c++ %}
+
+template <typename T>
+class lock_free_stack_by_othermemoryorder
+{
+  private:
+    struct node;
+    //直接将引用计数存放在节点中
+    struct counted_node_ptr
+    {
+        int external_count;
+        node* ptr;
+    };
+
+    struct node
+    {
+        std::shared_ptr<T> data;
+        std::atomic<int> internal_count;
+        counted_node_ptr next;
+
+        node(T value):data(std::make_shared<T>(value)),internal_count(0)
+        {
+
+        }
+    };
+
+    std::atomic<counted_node_ptr> head;
+
+    void increase_head_count(counted_node_ptr& old_head)
+    {
+        counted_node_ptr new_head;
+        do
+        {
+            new_head = old_head;
+            ++new_head.external_count;
+        //成功则需要保证获取的是push操作插入的数据，失败则只需要保证互斥
+        }while(head.compare_exchange_strong(old_head,new_head,std::memory_order_acquire,std::memory_order_relaxed));
+    }
+
+  public:
+    void push(T value)
+    {
+        node* new_node = new node(value);
+        counted_node_ptr p;
+        p.external_count = 1;
+        p.ptr = new_node;
+        //这里可以只需保证互斥即可，在比较/交换中提交
+        p.ptr->next = head.load(std::memory_order_relaxed);
+        //成功则提交，失败则只需互斥
+        while(head.compare_exchange_weak(p.ptr->next,p,std::memory_order_release,std::memory_order_relaxed));
+    }
+
+    std::shared_ptr<T> pop()
+    {
+        counted_node_ptr old_head = head.load();
+        while(1)
+        {
+            //已使用acquire，来获得push操作已经提交的数据
+            increase_head_count(old_head);
+            node* ptr = old_head.ptr;
+            if(!ptr)
+            {
+                return std::shared_ptr<T>();
+            }
+            //increase_head_count里面已经保证获取了push操作的提交，这里只需要relaxed
+            if(head.compare_exchange_strong(old_head, ptr->next,std::memory_order_relaxed))
+            {
+                std::shared_ptr<T> res;
+                res.swap(ptr->data);
+                int increase_count = old_head.external_count - 2;
+                //这里swap操作必须保证在删除之前，所以这里fetch_add操作需要使用release，
+                //pop节点失败的fetch_sub使用acquire
+                if(ptr->internal_count.fetch_add(increase_count,std::memory_order_release) == -increase_count)
+                  delete ptr;
+                return res;
+            }
+            //这里因为最多只有一个线程能进入删除部分，所以在删除前使用通过load使用acquire
+            //保证swap在delete前
+            else if(ptr->internal_count.fetch_sub(1,std::memory_order_relaxed) == 1)
+            {
+                ptr->internal_count.load(std::memory_order_acquire);
+                delete ptr;
+            }
+        }
+    }
+};
+{% endhihglihgt %}
