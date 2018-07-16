@@ -1,0 +1,227 @@
+---
+layout: post
+title:  "UNIX网络编程"
+date:   2018-07-13 13:59:51 +0800
+categories: unix_network_programming
+tags: c++
+description: unix network programming读书笔记
+---
+
+## 套接字地址结构
+
+### IPv4套接字地址结构
+
+{% highlight c++ %}
+
+struct in_addr
+{
+  in_addr_t s_addr;
+};
+
+struct sockaddr_in
+{
+  uint8_t        sin_len;     //结构体大小
+  sa_family_t    sin_family;  //协议族
+  in_port_t      sin_port;    //端口号
+  struct in_addr sin_addr;    //IP地址
+  char           sin_zero[8]; //留存空间
+};
+{% endhighlight %}
+
+* sin_len为套接字地址结构的长度字段，POSIX规范不要求有此成员。
+* 即使有长度字段，也无需设置和检查它，除非涉及路由套接字。它是由处理来自不同协议族的套接字地址结构的例程在内核中使用的。
+* POSIX规范只需要这个结构中的3个字段：sin_family、sin_addr和sin_port。
+* in_addr_t数据类型必须是一个至少32位的无符号整数类型，in_prot_t必须是一个至少16位的无符号整数类型，而sa_family_t可以是任何无符号整数类型。
+* IPv4地址和TCP或UDP端口号在套接字地址结构中总是以网络字节序来存储。
+* 32位IPv4存在两种不同的访问方法，如果serv定义为某个网际套接字的地址结构，那么serv.sin_addr将按in_addr结构引用其中32位IPv4地址。而serv.sin_addr.s_addr将按in_addr_t引用同一个32位IPv4地址。
+* sin_zero未曾使用，在填写套接字地址结构时，置为0。
+
+### 通用套接字地址结构
+
+声明通用的套接字地址结构用以处理来自所支持的任何协议族的套接字地址结构。
+
+{% highlight c++ %}
+
+struct sockaddr
+{
+  uint8_t       sa_len;
+  sa_family_t   sa_family;
+  char          sa_data[14];
+};
+
+{% endhighlgiht %}
+
+在bind函数中，需要将不同协议族的套接字地址结构强制转换成通用套接字地址结构指针。
+
+### IPv6套接字地址结构 
+
+{% highlight c++ %}
+
+struct in6_addr
+{
+  uint8_t s6_addr[16];
+};
+
+#define SIN6_LEN
+
+struct sockaddr_in6
+{
+  uint8_t          sin6_len;
+  sa_family_t      sin6_family;
+  in_port_t        sin6_port;
+  uint32_t         sin6_flowinfo;
+  struct in6_addr  sin6_addr;
+  uint32_t         sin6_scope_id;
+};
+
+{% endhighlight %}
+
+* 如果系统支持套接字地址结构中的长度字段，那么SIN6_LEN常值必须定义
+* IPv6的地址族是AF_INET6,而IPv4的地址族为AF_INET
+* 结构中字段的先后顺序做过编排，使得如果sockaddr_in结构体本身是64位对齐的，那么128位的sin6_addr也是64位对齐的。
+* sin6_flowinfo字段分为两个字段低序20位是流标，高12位保留
+* 对于具备范围的地址，sin6_scope_in字段标识其范围。
+
+### 新的通用套接字地址结构
+
+{% highlight c++ %}
+
+struct sockaddr_storage
+{
+  uint_t        ss_len;
+  sa_family_t   ss_family;
+};
+
+{% endhighlight %}
+
+* 如果系统支持的任何套接字地址结构有对齐需要，那么sockaddr_storage能满足最严苛的要求。
+* sockaddr_storage足够大，能够容纳系统支持的任何套接字地址结构。
+
+### 套接字地址结构的比较
+
+![2-5.png](2-5.png)
+
+## 值-结果参数
+
+* 从进程到内核传递套接字地址结构的函数有三个，bind、connect和sendto。指针和指针所指内容的大小都传递给内核，于是内核知道到底需要从进程赋值多少数据进来。
+* 从内核到进程传递套接字地址结构的函数有四个：accept，recvfrom、getsockname和getpeername。这4个函数中的两个参数是某个套接字地址结构的指针和指向表示该结构大小的整型变量的指针。当函数被调用时，结构大小是一个值，整数指针告诉内核该结构的大小，这样内核在写该结构时不至于越界；当函数返回时，结构大小又是一个结果，告诉进程内核在该结构中究竟存储了多少信息。
+
+## 字节排序函数
+
+* 小端字节序：低序字节存储在起始地址
+* 大端字节序：高序字节存储在起始地址
+
+{% highlight c++ %}
+
+union test
+{
+  short n;
+  char  c[sizeof(short)];
+};
+
+int main()
+{
+    union test t;
+    t.n = 0x0102;
+    //起始地址存储高序字节，大端
+    if(t.c[0] == 1 && t.c[1] == 2)
+      printf("it's big endian\n");
+    //起始地址存储低序字节，小端
+    else if(t.c[0] == 2 && t.c[1] == 1)
+      printf("it's little endian\n");
+    else
+      printf("unknow\n");
+}
+
+{% endhighlight %}
+
+网际协议使用大端字节序来传送这些多字节整数。
+
+
+套接字地址结构中的某些字段必须按照网络字节序进行传输。
+主机字节序和网络字节序之间可以通过下面4个函数进行转换：
+
+{% highlight c++ %}
+
+#include <netinet/in.h>
+
+uint16_t htons(uint16_t host16bitvalue);
+uint32_t htonl(uint32_t host32bitvalue);
+
+uint16_t ntohs(uint16_t net16bitvalue);
+uint32_t ntohl(uint32_t net32bitvalue);
+
+{% endhighlight %}
+
+
+## 字节操纵函数
+
+操纵字节字段的的函数有两组，名字以b开头的第一组函数和以m开头的第二组函数。
+
+{% highlight c++ %}
+
+#include <string.h>
+
+void bzero(void *dest,size_t nbytes);
+void bcopy(void *src, void *dest, size_t nbytes);
+void bcmp(void *ptr1, void *ptr2, size_t nbytes);
+
+void *memset(void *dest, int c , size_t len);
+void *memcpy(void *dest, const void *src, size_t len);
+void *memcmp(const void *ptr1, const *ptr2, size_t nbytes); 
+
+{% endhighlight %}
+
+当源字节串与目标字节串重叠时，bcopy能正确处理，但memcpy的操作结果却不可知。
+
+## inet_aton、inet_addr和inet_ntoa
+
+{% highlight c++ %}
+
+#include<arpa/inet.h>
+int inet_aton(const char* strptr, struct in_addr* addr);
+//若字符串有效返回1，否则返回0
+in_addr_t inet_addr(const char* strptr);
+//若成功返回32位二进制网络字节序IPv4地址，否则为INADDR_NONE
+
+char* inet_ntoa(struct in_addr_t addr);
+//返回一个指向点分十进制数串的指针
+
+{% endhighlight %}
+
+第一个函数inet_aton将strptr转换成32位网络字节序二进制值，并通过指针addr来存储，成功返回1，否则返回0。
+
+inet_addr进行相同的转换，返回值为32位的网络字节序二进制值。该函数存在一个问题，所有2^32个可能的二进制值都是有效的IP地址，但是当出错时，该函数返回INADDR_NONE常值（通常是一个32位均为1的值）。这意味着点分十进制数串255.255.255.255不能由该函数处理。此函数已废弃
+
+inet_ntoa将一个32位的网络字节序二进制IPv4地址转换成相应的点分十进制数串。由于该函数的返回值所指向的字符串驻留在静态内存中，这意味着该函数是不可重入的。
+
+## inet_pton和inet_ntop函数
+
+{% highlight c++ %}
+
+#include<arap/inet.h>
+int inet_pton(int family,const char* strptr, void* addrptr);
+//若成功返回0，若输入不是有效的表达式格式则为0，若出错则为-1
+
+const char *inet_ntop(int family, const void* addrptr,char* strptr, size_t len);
+//若成功则返回指向结果的指针，若出错则为NULL
+
+{% endhighlight %}
+
+这两个函数的family既可以是AF_INET也可以是AF_INET6。如果以不被支持的地址族作为family参数，这两个函数就都返回一个错误，并将error置为EAFNOSUPPORT。
+
+第一个函数尝试转换由strptr指针所指的字符串，并通过addptr指针存放二进制结果。若成功则返回1，否则如果对所指定的family而言，输入字符串不是有效的地址格式，那么返回值为0。
+
+inet_ntop进行相反的转换，从数值格式（addrptr）到表达式格式（strptr）。参数是目标存储单元的大小，以免该函数溢出其调用者的缓冲区。
+
+## sock_ntop和相关函数
+
+inet_ntop需要传入地址族，而地址通常和地址族一同存在于套接字地址结构中。所以可以自行编写入参为套接字地址结构的函数。
+
+{% highlight c++ %}
+
+//待编译
+{% endhighlight %}
+
+## readn、writen和readline函数
+
