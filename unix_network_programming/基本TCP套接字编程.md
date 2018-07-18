@@ -112,5 +112,118 @@ int accept(int sockfd,struct sockaddr *addr, socklen_t len);
 
 在讨论accpet函数时，我们称它的第一个参数为监听套接字，称它的返回值为已连接套接字。一个服务器通常仅仅创建一个监听套接字，它在该服务器的生命期中一直存在，内核为每个由服务器进程接收的客户连接创建一个已连接套接字。当服务器完成对某个客户的服务时，相应的已连接套接字就被关闭。
 
+{% highlight c++ %}
+
+#include"unp.h"
+#include<time.h>
+
+int main(int argc,char* argv[])
+{
+    int listenfd,sockfd;
+    struct sockaddr_in serv_sockaddr,clien_sockaddr;
+    socklen_t socklen;
+    char buf[MAXLEN];
+    time_t ticks;
+
+    listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    serv_sockaddr.sin_family = AF_INET;
+    serv_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serv_sockaddr.sin_port = htons(SERV_PORT);
+
+    bind(listenfd, (const struct sockaddr*) &serv_sockaddr, sizeof(serv_sockaddr));
+    listen(listenfd, LISTENQ);
+
+    for(;;)
+    {
+        socklen = sizeof(clien_sockaddr);
+        sockfd = accept(listenfd, (struct sockaddr*) &clien_sockaddr, &socklen);
+        printf("connection from %s,port %d\n", inet_ntop(AF_INET, &clien_sockaddr.sin_addr, buf,sizeof(buf)),ntohs(clien_sockaddr.sin_port));
+        ticks = time(NULL);
+        snprintf(buf, sizeof(buf), "%.24s\r\n", ctime(&ticks));
+        write(sockfd, buf, strlen(buf));
+    }
+    return 0;
+}
+
+{% endhighlight %}
+
+## fork和exec函数
+
+fork是unix中派生新进程的唯一方法。
+
+{% highlight c++ %}
+
+#include<unistd.h>
+int fork();
+//在子进程返回0，父进程返回子进程ID，出错返回-1
+
+{% endhighlight %}
 
 
+fork有两个典型用法：
+
+* 一个进程创建一个自身的副本，这样每个副本都可以在另一个副本执行其他任务时同时处理各自的操作。
+* 一个进程想要执行另一个程序。fork之后执行exec系列函数。
+
+exec系列函数之间的区别在于：
+
+* 待执行的程序文件是由文件名还是由路径名指定
+* 新程序的参数是一一列出还是由一个指针数组来引用
+* 把调用进程的环境传递给新程序还是给新程序指定新的环境
+
+{% highlight c++ %}
+
+#include<unistd.h>
+
+int execl(const char* pathname, const char* arg0,...);
+
+int execv(const char* pathname, char *const argv[]);
+
+int execle(const char* pathname, const char* arg0,..., char* const envp[]);
+
+int execve(const char* pathname, char* const argv[], char* const envp[]);
+
+int execlp(const char* pathname, const char *arg0,...);
+
+int execvp(const char* pathname, char* const argv[]);
+
+{% endhighlight %}
+
+只有execve是内核中的系统调用，其他5个都是调用execve的库函数。
+
+## 并发服务器
+
+每个文件或套接字都有一个引用计数。它是当前打开着的引用该文件或套接字的描述符的个数。socket返回后与listenfd关联的文件表项的引用计数值为1。accept返回后与sockfd关联的文件表项的引用计数值也为1。fork之后，这两个描述符就在父进程与子进程之间共享。因此与这两个套接字相关联的文件表项各自访问计数值均为2。当父进程关闭sockfd，只是把相应的引用计数值从2减为1。该套接字真正清理和资源释放要等到其引用计数值到达0时才发生。这会在稍后子进程也关闭connfd时发生。
+
+## close函数
+
+通常unix close函数也用来关闭套接字，并终止TCP连接。
+
+{% highlight c++ %}
+
+#include<unistd.h>
+
+int close(int sockfd);
+
+{% endhighlight %}
+
+如果确实想在某个TCP连接上发送一个FIN，那么可以改用shutdown函数。
+
+## getsockname和getpeername函数
+
+这两个函数或者返回某个套接字关联的本地协议地址（getsockname），或者返回与某个套接字关联的外地协议地址（getpeername）。
+
+{% highlight c++ %}
+
+#include<sys/socket.h>
+int getsockname(int fd, struct sockaddr *lockaddr, socklen_t addrlen);
+int getpeername(int fd, struct sockaddr *perraddr, socklen_t addrlen);
+//若成功则返回0，出错返回-1
+
+{% endhighlight %}
+
+* 在一个没有调用bind的TCP客户上，connect成功返回后，getsockname用于返回由内核赋予该连接的本地IP和端口号。
+* 在以端口号0调用bind后，getsockname用于返回由内核赋予的本地端口号
+* getsockname可用于获取某个套接字地址族
+* 在一个以通配IP地址调用bind的TCP服务器上，与某个客户的连接一旦建立，getsockname就可以用于返回由内核赋予该连接的本地IP地址。这样的调用中，套接字描述符参数必须是已连接套接字描述符，而不是监听套接字的描述符
+* 当一个服务器是由调用过accept的某个进程通过调用exec执行程序时，它能够获取客户身份的唯一途径就是通过getpeername。exec后子进程中存放客户地址的结构被释放，只有通过传递已连接套接字描述符，然后调用getpeername获取客户身份信息。
