@@ -236,3 +236,233 @@ pid_t wait(int *statloc);
 pid_t waitpid(pid_t pid, int *statloc, int options);
 //成功均返回进程ID，若出错则为0或-1
 {% endhighlight %}
+
+wait和waitpid均返回两个值，已终止子进程的进程ID，以及通过statloc指针返回的子进程终止状态。我们可以调用三个宏来检查终止状态，并辨别子进程是正常终止，由某个信号杀死还是仅仅由作业控制停止而已。
+
+如果调用wait进程没有已终止的子进程，但有一个或多个子进程正在执行，那么wait将阻塞直到现有子进程第一个终止为止。
+
+waitpid就等待那个子进程和是否阻塞给我我们更多的控制，pid允许我们指定想等待的进程，-1表示等待第一个终止的子进程。其次options参数允许我们指定附加选项，最长用的是WNOHANG，它告知内核在没有已终止子进程时不要阻塞。
+
+**函数wait和waitpid的区别**
+
+客户端建立5个与服务器的连接
+
+{% highlight c++ %}
+
+int main(int argc, char* argv[])
+{
+    int i,sock_fd[5];
+    struct sockaddr_in sin;
+    inet_pton(AF_INET, argv[1], &sin.sin_addr);
+    sin.sin_port = htons(atoi(argv[2]));
+    sin.sin_family = AF_INET;
+
+    for(i = 0; i < 5; i++)
+    {
+        sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+        connect(sock_fd, (const struct sockaddr*) &sin, sizeof(sin));
+    }
+
+    str_cli(stdin, sock_fd[0]);
+    exit(0);
+}
+
+{% endhighlight %}
+
+当客户终止时，基本同时发送了5个FIN，这导致服务器的5个子进程终止，子进程发送5个SIGCHLD给父进程。
+
+
+问题在于信号都在信号处理函数执行之前产生，而信号处理函数只执行一次。所以在信号处理函数中循环调用waitpid，并且必须制定WNOHANG选项，它告知waitpid在有尚未终止的子进程在运行时不要阻塞。不能使用wait，因为wait无法在尚有未终止子进程的情况下不阻塞。
+
+{% highlight c++ %}
+
+void sig_chld(int signo)
+{
+    pid_t pid;
+    int stat;
+
+    while((pid = waitpid(-1, &stat, WNOHANG)) > 0);
+    printf("child %d terminated\n", pid);
+    return ;
+}
+
+{% endhighlight %}
+
+服务器代码如下：
+
+* 当fork子进程时，必须捕获SIGCHLD
+* 当捕获信号时，必须处理被中断的系统调用
+* SIGCHLD的信号处理函数必须正确编写，应使用waitpid函数避免产生僵尸进程
+
+{% highlight c++ %}
+
+int main(int argc, char*argv[])
+{
+    struct sockaddr_in serv_sockaddr,client_sockaddr;
+    socklen_t clilen;
+    int serv_fd,conn_fd;
+    pid_t childpid;
+
+    serv_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    memset(&serv_sockaddr, 0, sizeof(serv_sockaddr));
+    serv_sockaddr.sin_family = AF_INET;
+    serv_sockaddr.sin_port = htons(SERV_PORT);
+    //通用地址
+    serv_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    bind(serv_fd, (const struct sockaddr*) &serv_sockaddr, sizeof(serv_sockaddr));
+    listen(serv_fd, LISTENQ);
+    Signal(SIGCHLD, sig_chld);
+    for(;;)
+    {
+        //阻塞与accept，等待连接到来
+        conn_fd = accept(serv_fd, (struct sockaddr*) &client_sockaddr, &clilen);
+        //fork子进程处理新连接
+        if((childpid = fork()) == 0)
+        {
+            close(serv_fd);
+            str_echo(conn_fd);
+            exit(0);
+        }
+        close(conn_fd);
+    }
+    return 0;
+}
+
+{% endhighlight %}
+
+## accept返回前连接中止
+
+三次握手完成之后，客户TCP发送一个RST。在服务器端看来，就在该连接已有TCP排队，等着服务器进程调用accept的时候RST到达。稍后服务器调用accept。
+
+模拟这种情形可以设置SO_LINGER套接字选项，打开这个开关，并等待0秒。
+
+不同的系统有不同的处理方式，POSIX指出返回的errno必须是ECONNABORTED。服务器可以忽略这个错误并在次调用accept。
+
+## 服务器进程终止
+
+步骤如下所述：
+
+* 当服务器主机崩溃时，已有的网络连接不发出任何东西。这里的假设是主机崩溃，而不是由操作人员执行关机命令
+* 我们在客户上键入一行文本，它由writen写入内核，再由客户TCP作为一个分节送出。客户随后阻塞于readline，等待回射应答
+* 如果我们用tcpdump观察网络就会发现，客户TCP持续重传数据分节，试图从服务器上接收一个ACK分节。当客户TCP最终放弃时，给客户进程返回一个错误。错误为ETIMEOUT、EHOSTUNREACH或ENETUNREACH。
+
+## 服务器主机崩溃后重启
+
+步骤如下：
+
+* 启动服务器和客户，并在客户键入一行文本以确认连接建立
+* 服务器主机崩溃并重启
+* 
+* 在客户上键入一行文本，它将作为一个数据分节发送到服务器主机
+* 当服务器主机崩溃后重启时，它的TCP丢失了崩溃前的所有连接信息，因此服务器TCP对于所有收到的来自客户的数据分节响应以一个RST。
+* 当客户收到该RST时，客户正阻塞于readline调用，导致该调用返回ECONNREST错误。
+
+如果对客户而言服务器主机崩溃与否很重要，即使客户不主动发送数据也能检测出来，就需要采用其他技术，SO_KEEPLIVE套接字选项或心跳包。
+
+## 服务器主机关机
+
+Unix系统关机时，init进程通常先给所有进程发送SIGTERM信号（改信号可以被捕获），等待一段固定的时间，然后给所有仍在运行的进程发送SIGKILL信号。这么做留给所有运行的程序一小段时间来清除和终止。如果不捕获SIGTERM信号并终止，服务器将由SIGKILL信号终止。
+
+## TCP程序例子小节
+
+在TCP客户和服务器可以彼此通信之前，每一端都得指定连接的套接字：本地IP地址、本地端口、外地IP地址、外地端口。外地地址和外地端口必须在客户调用connect时指定，而两个本地值通常就由内核作为connect的一部分来选定。客户可以在调用connect之前，通过调用bind来指定其中一部分或全部两个本地值，不过这种做法并不常见。
+
+服务器本地端口由bind指定。bind调用中服务器指定的本地IP地址通常是通配IP地址。如果服务器在一个多宿主机上绑定通配IP地址，那么可以在连接后通过getsockname来确定本地IP地址。两个外地值则由accept调用返回给服务器，可以通过getpeername来获取客户的IP地址和端口号。
+
+## 数据格式
+
+**在客户与服务器之间传递文本串**
+
+{% highlight c++ %}
+
+void str_echo(int sockfd)
+{
+    long arg1, arg2;
+    sszie_t n;
+    char line[MAXLEN];
+
+    for(;;)
+    {
+        if((n = readline(scokfd,line, MAXLEN)) == 0)
+          return;
+        if(sscanf(line, "%ld%ld", &arg1,&arg2) == 2)
+          snprintf(line, sizeof(line), "%ld\n", arg1 + arg2);
+        else
+          snprintf(line, sizeof(line), "input error\n");
+        n = strlen(line);
+        writen(sockfd,line, n);
+    }
+}
+
+{% endhighlight %}
+
+不论客户和服务器的字节序如何，客户和服务器都工作的很好
+
+
+**在客户与服务器之间传递二进制结构**
+
+{% highlight c++ %}
+
+struct args
+{
+    long arg1;
+    long arg2;
+};
+
+struct result
+{
+    long sum;
+};
+
+void str_cli(FILE* fp, int sockfd)
+{
+    char sendline[MAXLEN];
+    struct args args;
+    struct result result;
+
+    while(fgets(sendline, MAXLEN, stdin))
+    {
+        if(sscanf(sendline,"%ld%ld", &args.arg1, &args.arg2) != 2)
+        {
+            printf("invalid input: %s", sendline);
+            continue;
+        }
+        writen(sockfd, &args, sizeof(args));
+        if(readn(sockfd, &result, sizeof(result)) == 0)
+        {
+            perror("str_cli:server terminated prematurely");
+            exit(-1);
+        }
+        printf("%ld\n", result.sum);
+    }
+}
+
+void str_echo(int sockfd)
+{
+    sszie_t n;
+    struct args args;
+    struct result result;
+
+    for(;;)
+    {
+        if((n = readn(sock_fd, &args, sizeof(args))) == 0)
+          return;
+        result.sum = args.arg1 + args.arg2;
+        writen(sockfd, &result, sizoef(result));
+    }
+}
+
+{% endhoghlight %}
+
+本例子存在三个问题：
+
+* 不同的实现以不同的格式存储二进制
+* 不同的实现在存储相同的C数据类型上可能存在差异
+* 不同的实现给结构打包的方式存在差异，取决于各种数据类型所用的位数以及机器的对齐限制
+
+解决这种数据格式问题有两个常用的方法
+
+* 把所有数值作为文本串来传递
+* 显示定义所支持数据的二进制格式并以这样的格式在客户与服务器之间传递所有数据。
