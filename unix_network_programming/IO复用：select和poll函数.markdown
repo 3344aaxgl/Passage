@@ -142,3 +142,78 @@ void FD_ISSET(int fd, fd_set *fdset);
 select函数中间的三个参数readset，writeset和exceptset中，如果我们对某个条件不感兴趣，就可以把他设为空指针。
 
 maxfdp1指定待测试描述符个数，它的值是待测试的最大描述符加1.描述符0,1,2,3...一直到maxfdp1-1均将被测试。
+
+select函数修改由指针readset、writeset和exceptset所指向的描述符集。因而这三个参数都是值——结果参数。调用该函数时，指定我们关心的描述符值，该函数返回时，结果将指示哪些描述符已就绪。该函数返回时，使用FD_ISSET宏来测试fd_set数据类型中的描述符。描述符集内任何与未就绪描述符对应的位返回时均清成0.为此，每次调用select函数时，我们都得再次把所有描述符集内所关心的位均置为1.
+
+### 描述符就绪条件
+
+满足下列四个条件中的任何一个时，一个套接字准备好读
+
+* 该套接字接收缓冲区中的数据字节数大于等于套接字接收缓冲区低水平标记的当前大小。对这样的套接字执行读操作不会阻塞并返回一个大于0的值。我们可以使用SO_RCVLOWAT套接字选项设置该套接字的低水位标记
+* 该连接的读半部关闭。对这样的套接字的读操作将不阻塞并返回0
+* 该套接字是一个监听套接字且已完成的连接数不为0。对这样的套接字accept通常不会阻塞。
+* 其上有一个套接字错误待处理。对这样套接字的读操作将不阻塞并返回-1.
+
+下列四个条件中的任何一个满足时，一个套接字准备好写
+
+* 该套接字发送缓冲区中的可用空间字节数大于等于套接字发送缓冲区低水平位的当前大小，并且该套接字已连接或不需要连接。如果我们将这样的套接字设置成非阻塞，写操作将不阻塞并返回一个正值。我们可以使用SO_SNDLOWAT套接选项来设置该套接字的低水平位标记。对于TCP和UDP套接字而言，其默认值通常为2048
+* 该连接的写半部关闭。对这样的套接字的写操作将产生SIGPIPE信号
+* 使用非阻塞式connec的套接字已建立连接，或者connect以失败告终
+* 其上有一个套接字错误待处理
+
+如果一个套接字存在带外数据或者仍处于带外标记，那么它由异常条件待处理。
+
+当套接字发生错误时，它将由select标记为既可读又可写。
+
+接收低水平位标记和发送低水平位标记的目的在于：允许应用进程控制在select返回可读或可写条件之前有多少数据可读或多大空间可写。
+
+![6-7.png](6-7.png)
+
+### select的最大描述符
+
+仅仅修改\<sys/types.h\>中的FD_SETSIZE不起作用，需要重新编译内核
+
+## str_cli函数（修订版）
+
+{% highlight c++ %}
+
+void str_cli(FILE *fp, int sockfd)
+{
+    fd_set readset;
+    int count;
+    char sendline[MAXLEN];
+    char recvline[MAXLEN];
+
+    for (;;)
+    {
+        //每次调用select前设置关心的套接字描述符
+        FD_ZERO(&readset);
+        FD_SET(sock_fd, &readset);
+        FD_SET(fileno(fp), &readset);
+        //取得关心最大套接字 + 1
+        int maxfd = (fileno(fp) > sock_fd ? fileno(fp) : sockfd) + 1;
+        count = select(maxfd, &readset, NULL, NULL, NULL);
+        //是否被设置
+        if (FD_ISSET(fileno(fp), &readset))
+        {
+            if (fgets(sendline, MAXLEN, fp) == NULL)
+              return;
+            write(sockfd, sendline, strlen(sendline));
+        }
+        if (FD_ISSET(sockfd, &readset))
+        {
+            if(readline(sockfd, recvline, MAXLEN) == 0)
+            {
+                perror("recive FIN");
+                exit(0);
+            }
+            fputs(recvline, stdout);
+        }
+    }
+}
+
+{% endhighlight  %}
+
+程序不会阻塞fgets而没有及时收到FIN
+
+## 批量输入
