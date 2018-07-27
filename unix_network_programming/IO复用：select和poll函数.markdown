@@ -217,3 +217,317 @@ void str_cli(FILE *fp, int sockfd)
 程序不会阻塞fgets而没有及时收到FIN
 
 ## 批量输入
+
+select函数只从系统调用角度关心读写缓冲区，如果混用了使用了自有缓冲区的函数，可能出现大量数据已经存入自有缓冲区，而函数只返回一部分给程序。但是select并不关心函数自有缓冲区的内容，不会有再有读写状态返回。
+
+## shutdown函数
+
+终止网络连接的的通常方法是调用close函数。不过close有两个限制，却可以使用shutdown来避免。
+
+* close把描述符的引用计数减1，仅在该计数变为0时才关闭套接字。使用shutdown可以不管引用计数就激发TCP的正常连接终止序列。
+* close终止读和写两个方向的数据传送。
+
+{% highlight c++ %}
+
+#include<sys/socket.h>
+int shutdown(int sockfd, int howto);
+
+{% endhighlight %}
+
+该函数的行为依赖于howto参数的值：
+
+* SHUT_RD关闭连接读的这一半——套接字中不在有数据可以接收，而且套接字缓冲区中的现有数据都被丢弃。
+* SHUT_WR关闭连接写的这一半——对于TCP套接字，这称为半关闭。当前留在套接字发送缓冲区的数据将被发送掉，后跟TCP的正常终止序列。
+* SHUWRDWR连接的读半部和写半部都关闭——这与调用shutdown两次等效：第一次调用指定SHUT_RD，第二次调用指定SHUT_WR
+
+## str_cli函数（再修订版）
+
+{% highlight c++ %}
+
+void str_cli(FILE *fp, int sockfd)
+{
+    fd_set readset;
+    int count, maxfd, stdineof;
+    char sendline[MAXLEN];
+    char recvline[MAXLEN];
+    FD_ZERO(&readset);
+    stdineof = 0;
+    for (;;)
+    {
+        //每次调用select前设置关心的套接字描述符
+        FD_SET(sock_fd, &readset);
+        FD_SET(fileno(fp), &readset);
+        //取得关心最大套接字 + 1
+        maxfd = (fileno(fp) > sock_fd ? fileno(fp) : sockfd) + 1;
+        count = select(maxfd, &readset, NULL, NULL, NULL);
+        //是否被设置
+        if (FD_ISSET(fileno(fp), &readset))
+        {   //不在使用自有缓冲区的函数
+            if (read(fielno(fp),sendline, MAXLEN) == 0)
+            {
+                stdineof = 1;
+                shutdown(sockfd, SHUT_WR);
+                FD_CLR(fileno(fp), &readset);
+                continue;
+            }
+            write(sockfd, sendline, strlen(sendline));
+        }
+        if (FD_ISSET(sockfd, &readset))
+        {
+            if(read(sockfd, recvline, MAXLEN) == 0)
+            {
+                if(stdineof == 1)
+                  return ;
+                else
+                {
+                    perror("server terminate prematurely");
+                    exit(-1);
+                }
+            }
+            write(fileno(stdout),recvline, strlen(recvline));
+        }
+    }
+}
+
+{% endhighlight %}
+
+## TCP回射服务器程序（修订版）
+
+{% highlight c++ %}
+
+int main()
+{
+    int listenfd,maxfd,clifd,maxi,i,n;
+    struct sockaddr_in servaddr,cliaddr;
+    socklen_t len;
+    fd_set readset,allset;
+    int count,client[FD_SETSIZE];
+    char buf[MAXLEN];
+
+    memset(servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    listenfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    bind(listenfd, (const struct sockaddr*) &servaddr, sizeof(servaddr));
+    listen(listenfd, LISTENQ);
+
+    maxfd = listenfd;
+    maxi = -1;
+    FD_ZERO(&allset);
+    FD_SET(listenfd, &allset);
+
+    for(;;)
+    {
+        readset = allset
+        count = select(maxfd + 1,&readset, NULL,NULL,NULL);
+        if(FD_ISSET(listenfd, &readset))
+        {
+            len = sizeof(cliaddr);
+            clifd = accept(listenfd,(struct sockaddr*) &cliaddr, &len);
+            for(i = 0; i< FD_SETSIZE; i++)
+            {
+                //找到第一个未被使用的用来存储已连接套接字
+                if(client[i] < 0)
+                {
+                  client[i] = clifd;
+                  break;
+                }
+            }
+            if (i == FD_SETSIZE)
+            {
+                perror("too many client");
+                exit(-1);
+            }
+            FD_SET(clifd, &allset);
+            if(clifd > maxfd)
+              maxfd = clifd;
+            if(maxi < i)
+              maxi = i;
+            //只有监听套接字有事件发生
+            if(--count <= 0 )
+                continue;
+        }
+        for(i = 0; i <= maxi; i++)
+        {
+            if(client[i] < 0)
+              continue;
+            if(FD_ISSET(sockfd,&readset))
+            {
+                //改成不使用自有缓存的函数
+                if((n = readn(client[i], buf, MAXLEN)) == 0)
+                {
+                    close(client[i]);
+                    FD_CLR(sockfd,&allset);
+                    client[i] = -1;
+                }
+                else
+                {
+                    writen(client[i], buf, n);
+                }
+
+                if(--count <= 0)
+                  break;
+            }
+        }
+    }
+    return 0;
+}
+
+{% endhighlight %}
+
+**拒绝服务型攻击**
+
+当一个服务器在处理多个客户时，它绝对不能阻塞于只与单个客户相关的某个函数调用。否则可能导致服务器被挂起，拒绝为所有其他客户提供服务。这就是所谓的拒绝服务型攻击。可能的解决办法包括：
+
+* 使用非阻塞式I/O
+* 让每个客户由单独的线程提供服务
+* 对I/O操作设置一个超时
+
+## pselect函数
+
+{% highlight c++ %}
+
+#include<sys/select.h>
+#include<signal.h>
+#include<time.h>
+
+int pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set exceptset, const struct timespec *timeout, const sigset_t *sigmask);
+//如有就绪描述符则为其数目，若超时则为0，否则为-1
+
+{% endhighlight %}
+
+pselect相对于select有两个变化：
+
+* pselect使用timespec结构，而不是用timeval结构。
+* pselect函数增加了第六个参数：一个指向信号掩码的指针。该参数允许程序先禁止递交某些信号，再测试由这些当前被禁止信号的处理函数设置的全局变量，然后调用pselect，告诉他重新设置信号掩码。
+
+## poll函数
+
+{% highlight c++ %}
+
+#include<poll.h>
+int poll(struct pollfd *fdarray, unsigned long nfds, int timeout);
+//若有就绪描述符则为其数目，若超时则为0，若出错则为-1
+
+struct pollfd
+{
+  int fd;
+  short events;
+  short revents;
+};
+{% endhighlight %}
+
+第一个参数是指向一个结构数组第一个元素的指针，每个数组元素都是一个pollfd结构，用于指定测试某个描述符的条件。
+
+![6-8.png](6-8.png)
+
+poll识别三类数据：普通，优先级带和高优先级
+
+POSIX在其poll的定义中留了许多空洞
+
+* 所有正规TCP数据和所有UDP数据都被认为是普通数据
+* TCP的带外数据被认为是优先级带数据
+* 当TCP连接的读半部关闭时，也被认为是普通数据，随后的读操作返回0
+* TCP连接存在错误既可认为是普通数据，也可认为是错误。无论那种情况，随后的读操作将返回-1，并把errno设置成合适的值
+* 在监听套接字上有新的连接可用既可认为是普通数据，也可以认为是优先级数据。大多数实现视之为普通数据。
+* 非阻塞式connect的完成被认为是使相应的套接字可写
+
+
+timeout参数指定poll函数返回前等待多长时间，
+
+![6-9.png](6-9.png)
+
+当发生错误时，poll函数返回值-1，若定时器到时之前没有任何描述符就绪，这返回0。否则返回就绪描述符的个数。
+
+{% highlight c++ %}
+
+
+int main()
+{
+    int i, maxi, listenfd, connfd, sockfd;
+    int nready;
+    ssize_t n;
+    char buf[MAXLEN];
+    socklen_t clilen;
+    struct pollfd client[OPEN_MAX];
+    struct sockaddr_in cliaddr, servaddr;
+
+    listenfd = socket(AF_INET, SOCK_STREAM, 0);
+    bzero(&servaddr, sizeof(servaddr));
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(SERV_PORT);
+
+    bind(listenfd, (const struct sockaddr*) & servaddr, sizeof(servaddr));
+    listen(listen, LISTENQ);
+
+    client[0].fd = listenfd;
+    client[0].events = POLLRDNORM;
+    for(i = 0;i < OPEN_MAXl; i++)
+        client[i].fd = -1;
+    maxi = 0;
+
+    for(;;)
+    {
+        nready = poll(client, maxi + 1, INFTIME);
+
+        if(client[0].revents & POLLRDNORM)
+        {
+            clilen = sizeof(cliaddr);
+            connfd = accept(listenfd, (struct sockaddr*) &cliaddr, &clilen);
+
+            for(i = 0; i < OPEN_MAX; i++)
+              if(client[i].fd < 0)
+              {
+                client[i].fd = connfd;
+                break;
+              }
+            if(i == OPEN_MAX)
+            {
+                perror("too many clients");
+                exit(-1);
+            }
+            client[i].events = POLLRDNORM;
+            if(maxi < i)
+              maxi = i;
+            if(--nready <= 0)
+              continue;
+        }
+        for(i = 1; i < maxi; i++)
+        {
+            if((sockfd = client[i].fd) < 0)
+              continue;
+            if(client[i].revents & (POLLRDNORM | POLLERR))
+            {
+                if((n = read(sockfd, buf, MAXLEN)) < 0)
+                {
+                    if(errno == ECONNREST)
+                    {
+                        close(sockfd);
+                        client[i].fd = -1
+                    }
+                    else
+                    {
+                        perror(read error);
+                        exit(-1);
+                    }
+                }
+                else if(n == 0)
+                {
+                    close(sockfd);
+                    client[i].fd = -1;
+                }
+                else
+                  writen(sockfd, buf, n);
+                if(--nready <= 0)
+                  break;
+            }
+        }
+    }
+    return 0;
+}
+
+{% endighlight %}

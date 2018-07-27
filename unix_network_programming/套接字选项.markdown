@@ -1,0 +1,197 @@
+---
+layout: post
+title:  "套接字选项"
+date:   2018-07-26 20:15:51 +0800
+categories: unix_network_programming
+tags: c++
+description: unix network programming读书笔记
+---
+
+## getsockopt和setsockopt函数
+
+这两个函数仅用于套接字
+
+{% highlight c++ %}
+
+#include<sys/socket.h>
+int getsockopt(int sockfd, int level, int optname, void * optval, socklen_t *optlen);
+
+int setsockopt(int sockfd, int level, int optname, const void * optval, socklen_t optlen);
+//若成功返回0，失败返回-1
+
+{% endhihglight %}
+
+其中sockfd必须指向一个打开的套接字描述符，level指定系统中解释选项的代码或为通用套接字代码或为某个特定于协议的代码。
+
+optval是一个指向某个变量的指针，setsockopt从*optval中取得选项待设置的新值，getsockopt则把已获取的选项当前值存放到*optval。optval的的大小由最后一个参数决定。它对于setsockopt是一个值参数，对于getsockopt是一个值-结果参数。
+
+套接字粗分为两大类：
+
+* 启用或禁止某个特性的二元选项
+* 取得并返回我们可以设置或检查的特定值的选项
+
+## 检查选项是否支持并获取默认值
+
+{% highlight c++ %}
+
+union val
+{
+    int              i_val;
+    long             l_val;
+    struct linger    linger_val;
+    struct timeval   time_val;
+};
+
+static char *sock_str_flag(union *val, int);
+static char *sock_str_int(union *val, int);
+static char *sock_str_linger(union *val, int);
+static char *sock_str_timeval(union *val, int);
+
+struct sock_opts
+{
+    const char *opt_str;
+    int         opt_level;
+    int         opt_name;
+    char  *(*opt_val_str)(union val* ,int);
+}sock_opts[] = {
+      {"SO_BROADCAST",    SOL_SOCKET,   SO_BROADCAST,   sock_str_flag},
+      {"SO_DEBUG",        SOL_SOCKET,   SO_DEBUG,       sock_str_flag},
+      {"SO_DONROUTE",     SOL_SOCKET,   SO_DONROUTE,    sock_str_flag},
+      {"SO_ERROR",        SOL_SOCKET,   SO_ERROR,       sock_str_int},
+      {"SO_KEEPALIVE",    SOL_SOCKET,   SO_KEEPLIVE,    sock_str_flag},
+      {"SO_LINGER",       SOL_SOCKET,   SO_LINGER,      sock_str_linger},
+      {"SO_OOBINLINE",    SOL_SOCKET,   SO_OOBINLINE,   sock_str_flag},
+      {"SO_RCVBUF",       SOL_SOCKET,   SO_RCVBUF,      sock_str_int},
+      {"SO_SNDBUF",       SOL_SOCKET,   SO_SNDBUF,      sock_str_int},
+      {"SO_RCVLOWAT",     SOL_SOCKET,   SO_RCVLOWAT,    sock_str_int},
+      {"SO_SNDLOWAT",     SOL_SOCKET,   SO_SNDLOWAT,    sock_str_int},
+      {"SO_RCVTIMEO",     SOL_SOCKET,   SO_RCVTIMEO,    sock_str_timeval},
+      {"SO_SNDTIMEO",     SOL_SOCKET,   SO_SNDTIMEO,    sock_str_timeval},
+      {"SO_REUSEADDR",    SOL_SOCKET,   SO_REUSEADDR,   sock_str_flag},
+    #ifdef SO_REUSEPORT
+      {"SO_REUSEPORT",    SOL_SOCKET,   SO_REUSEPORT,   sock_str_flag},
+    #else
+      {"SO_REUSEPORT",    0,          0,              NULL},
+    #endif
+      {"SO_TYPE",         SOL_SOCKET,   SO_TYPE,        sock_str_int},
+      {"SO_USELOOPBACK",  SOL_SOCKET,   SO_USELOOBACK,  sock_str_flag},
+      {"IP_TOS",          IPPROTO_IP,   IP_TOS,         sock_str_int},
+      {"IP_TTL",          IPPROTO_IP,   IP_TTL,         sock_str_int},
+      {"IPV6_DONTFRAG",   IPPROTO_IPV6, IP_DONTFRAG,    sock_str_flag},
+      {"IPV6_UNICAST_HOPS", IPPROTO_IPV6, IPV6_UNICAST_HOPS, sock_str_int},
+      {"IPV6_V6ONLY",     IPPROTO_IPV6, IPV6_V6ONLY,    sock_str_flag},
+      {"TCP_MAXSEG",      IPPROTO_TCP,  TCP_MAXSEG,     sock_str_int},
+      {"TCP_NODELAY",     IPPROTO_TCP,  TCP_NODELAY,    sock_str_flag},
+      {"SCTP_AUTOCLOSE",  IPPROTO_SCTP, SCTP_AUTOCLOSE, sock_str_int},
+      {"SCTP_BUREST",     IPPROTO_SCTP, SCTP_BUREST,    sock_str_int},
+      {"SCTP_MAXSEG",     IPPROTO_SCTP, SCTP_MAXSEG,    sock_str_int},
+      {"SCTP_NODELAY",    IPPROTO_SCTP, SCTP_NODELAY,   sock_str_flag},
+      {NULL,              0,            0,              NULL}
+    };
+
+
+int main(int argc, char*argv[])
+{
+    int fd;
+    socklen_t len;
+    struct sock_opts* ptr;
+
+    for(ptr = sock_opts; ptr->opt_str !=NULL; ptr++)
+    {
+        printf("%s:", ptr->opt_str);
+        if(ptr->opt_val_str == NULL)
+          printf("(undefine)\n");
+        else
+          {
+              switch(ptr->opt_level)
+              {
+                  case SOL_SOCKET:
+                  case IPPROTO_IP:
+                  case IPPROTO_TCP:
+                    fd = socket(AF_INET, SOCK_STREAM, 0);
+                    break;
+              #ifdef IPV6
+                  case IPPROTO_IPV6:
+                    fd = socket(AF_INET6, SOCK_STREAM,0);
+                    break;
+              #endif
+
+              #ifdef IPPROTO_SCTP
+                  case IPPROTO_SCTP:
+                    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+                    break;
+              #endif 
+              default:
+                {
+                    perror("Can't create fd for level %d\n", ptr->opt_level);
+                    exit(-1);
+                }
+              }
+              len = sizeof(val);
+              if(getsockopt(fd, ptr->opt_level, ptr->opt_name, &val,&len) == -1)
+              {
+                  perror("getsockopt error");
+              }
+              else
+              {
+                  printf("defalue = %s\n", (*ptr->opt_val_str)(&val,&len));
+              }
+              close(fd);
+          }
+    }
+    return 0;
+}
+
+static char strres[128];
+
+static char* sock_st_flag(union val *str, int len)
+{
+    if(len != sizeof(int))
+      snprintf(strres, sizeof(strres), "size (%d) not sizeof(int)", len);
+    else
+      snprintf(strres, sizeof(strres), "%s", (str->i_val == 0) ? "off":"on");
+    return strres;
+}
+
+static char* sock_st_int(union val *str, int len)
+{
+    if(len != sizeof(int))
+      snprintf(strres, sizeof(strres), "size (%d) not sizeof(int)", len);
+    else
+      snprintf(strres, sizeof(strres), "%s", str->i_val);
+    return strres;
+}
+
+static char* sock_st_linger(union val *str, int len)
+{
+    if(len != sizeof(int))
+      snprintf(strres, sizeof(strres), "size (%d) not sizeof(int)", len);
+    else
+      snprintf(strres, sizeof(strres), "l_onoff = %d, l_linger", str->linger_val.l_onoff , str->linger_val.l_linger);
+    return strres;
+}
+
+static char* sock_st_time(union val *str, int len)
+{
+    if(len != sizeof(int))
+      snprintf(strres, sizeof(strres), "size (%d) not sizeof(int)", len);
+    else
+      snprintf(strres, sizeof(strres), "%d sec, %dusec", str->time_val.tv_sec, str->time_val.tv_usec);
+    return strres;
+}
+
+{% endhighlight %}
+
+## 通用套接字选项
+
+### SO_BROACAST套接字选项
+
+本选项开启或禁止进程发送广播消息的能力。只有数据报套接字支持广播，并且还必须是在支持广播消息的网络上。如果目的地址是一个广播地址且本套接字选项没有打开，那么返回EACCESS错误。
+
+### SO_DEBUG套接字选项
+
+本选项仅由TCP支持。当给一个TCP套接字开启本选项时，内核将为TCP在该套接字发送和接收的所有分组保留详细跟踪信息。
+
+### SO_DONTROUTE套接字选项
+
+本选项规定外出的分组将绕过底层协议正常的路由机制。
