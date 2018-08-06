@@ -270,4 +270,35 @@ static void recvfrom_init(int signo)
 
 ## UDP中的外出接口确定
 
-已连接的UDP套接字还可以用来确定用于某个特定的目的地的外出接口。这是由connect函数应用到UDP套接字时的一个副作用造成的:内核选择本地IP地址。这个本地地址通过为目的IP地址搜索路由表得到外出接口，然后选用该接口的主IP地址而选定
+已连接的UDP套接字还可以用来确定用于某个特定的目的地的外出接口。这是由connect函数应用到UDP套接字时的一个副作用造成的:内核选择本地IP地址。这个本地地址通过为目的IP地址搜索路由表得到外出接口，然后选用该接口的主IP地址而选定。
+
+{% highlight c++ %}
+
+int main(int argc ,char* argv[])
+{
+    int sockfd;
+    socklen_t len;
+    struct sockaddr_in cliaddr, servaddr;
+
+    if(argc != 2)
+    {
+        perror("useage:udpcli <IPaddress>");
+        exit(-1);
+    }
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    bzero(&servaddr, sizeof(servaddr));
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(SERV_PORT);
+    inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
+
+    connect(sockfd, (struct sockaddr*) &servaddr, sizeof(servaddr));
+
+    len = sizeof(cliaddr);
+    getsockname(sockfd, (sockaddr*) &cliaddr,&len);
+    printf("local address %s\n", sock_ntop((struct sockaddr*) &sockaddr,len));
+    return 0;
+}
+
+{% endhighlight %}
